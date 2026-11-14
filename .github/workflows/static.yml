@@ -49,9 +49,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Zip up everything in the root folder into a file named game.zip
       - name: Zip repository contents
-        run: zip -r game.zip . -x ".git*" ".github*"
+        run: zip -r web.zip . -x ".git*" ".github*"
 
       - name: Push to Itch.io
         uses: Ayowel/butler-to-itch@v2
@@ -60,4 +59,4 @@ jobs:
           itch_user: enondev
           itch_game: neon-drift
           auto_channel: true
-          files: ./index.html[html5]
+          files: ./web.zip
