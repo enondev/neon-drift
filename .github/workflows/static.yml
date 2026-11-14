@@ -57,4 +57,4 @@ jobs:
           itch_game: neon-drift
           auto_channel: true
           files: |
-            html5 index.html
+            html index.html
