@@ -72,7 +72,7 @@ const $ = id => document.getElementById(id);
 const cv = $('c'), g = cv.getContext('2d'), rnd01 = Math.random;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const len = (x, y) => Math.hypot(x, y) || 1;
-const norm = (x, y) => { const l = len(x, y); return [x / l, y / l]; };
+const limit = (x, y) => { const l = Math.hypot(x, y); return l > 1 ? [x / l, y / l] : [x, y]; };
 const dist2 = (ax, ay, bx, by) => (ax - bx) ** 2 + (ay - by) ** 2;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanSeed = s => String(s || '').replace(/[^\w-]/g, '').slice(0, 24);
@@ -224,184 +224,78 @@ function pushOut(entity) {
 }
 
 /* ========== Content tables ========== */
+// k = index in ENEMY. minT = seconds until it can spawn, w = spawn weight.
+// ai / death name entries in AI / DEATH below. boss: spawned only by the boss timer.
 const ENEMY = [
-  { hp: 18, s: 62, r: 10, d: 8, c: '#ff2bd6' },
-  { hp: 8,  s: 110, r: 7,  d: 5, c: '#ffd02b' },
-  { hp: 90, s: 40, r: 18, d: 14, c: '#ff6a2b' },
-  { hp: 26, s: 50, r: 10, d: 6, c: '#b36bff' },
-  { hp: 40, s: 55, r: 14, d: 9, c: '#7dff3a' },
-  { hp: 900, s: 50, r: 42, d: 20, c: '#ff2b4a' },
-  { hp: 22, s: 70, r: 9, d: 7, c: '#00e5ff' },
-  { hp: 28, s: 55, r: 11, d: 6, c: '#c77dff' },
+  /* 0 */ { name: 'Chaser',   ai: 'chase',   hp: 18,  s: 62,  r: 10, d: 8,  c: '#ff2bd6', minT: 0,   w: 1 },
+  /* 1 */ { name: 'Swarmer',  ai: 'chase',   hp: 8,   s: 110, r: 7,  d: 5,  c: '#ffd02b', minT: 28,  w: 1 },
+  /* 2 */ { name: 'Tank',     ai: 'chase',   hp: 90,  s: 40,  r: 18, d: 14, c: '#ff6a2b', minT: 56,  w: 1, gem: 3 },
+  /* 3 */ { name: 'Shooter',  ai: 'shooter', hp: 26,  s: 50,  r: 10, d: 6,  c: '#b36bff', minT: 84,  w: 1 },
+  /* 4 */ { name: 'Splitter', ai: 'chase',   hp: 40,  s: 55,  r: 14, d: 9,  c: '#7dff3a', minT: 112, w: 1, death: 'split' },
+  /* 5 */ { name: 'Boss',     ai: 'boss',    hp: 900, s: 50,  r: 42, d: 20, c: '#ff2b4a', boss: true, gem: 2, gems: 10, death: 'boss' },
+  /* 6 */ { name: 'Blinker',  ai: 'blinker', hp: 22,  s: 70,  r: 9,  d: 7,  c: '#00e5ff', minT: 140, w: 1 },
+  /* 7 */ { name: 'Orbiter',  ai: 'orbiter', hp: 28,  s: 80,  r: 11, d: 6,  c: '#c77dff', minT: 168, w: 1 }
 ];
+const SPAWNABLE = ENEMY.map((_, i) => i).filter(i => !ENEMY[i].boss);
 
-const BEHAVIORS = {
-  // 0 – basic chaser
-  0: {
-    update(e, dt, target) {
-      const dx = target.x - e.x, dy = target.y - e.y;
-      const d = len(dx, dy);
-      e.x += dx / d * e.s * dt;
-      e.y += dy / d * e.s * dt;
-    },
-    onDeath(e) {}
+const moveToward = (e, tx, ty, speed, dt) => {
+  const dx = tx - e.x, dy = ty - e.y, d = len(dx, dy);
+  e.x += dx / d * speed * dt;
+  e.y += dy / d * speed * dt;
+};
+const angleTo = (e, t) => Math.atan2(t.y - e.y, t.x - e.x);
+const fire = (e, angle, speed, dmg, life = 5) => eBullets.push({
+  x: e.x, y: e.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, d: dmg, l: life
+});
+
+function makeEnemy(k, x, y, hp) {
+  const t = ENEMY[k];
+  return { k, boss: !!t.boss, x, y, r: t.r, hp, mh: hp, s: t.s, d: t.d, c: t.c,
+           cd: 2 + rng(), fl: 0, oc: 0, lb: null };
+}
+
+/* AI behaviours: (enemy, dt, target) -> void. Add a new enemy = one ENEMY row + (optionally) one AI entry. */
+const AI = {
+  chase(e, dt, t) { moveToward(e, t.x, t.y, e.s, dt); },
+
+  shooter(e, dt, t) {
+    const d = len(t.x - e.x, t.y - e.y);
+    moveToward(e, t.x, t.y, d < 200 ? -e.s * 0.7 : d < 260 ? 0 : e.s, dt);   // keep distance
+    if ((e.cd -= dt) <= 0 && d < 460) { e.cd = 2; fire(e, angleTo(e, t), 210, 6); }
   },
 
-  // 1 – fast chaser
-  1: {
-    update(e, dt, target) {
-      const dx = target.x - e.x, dy = target.y - e.y;
-      const d = len(dx, dy);
-      e.x += dx / d * e.s * dt;
-      e.y += dy / d * e.s * dt;
-    },
-    onDeath(e) {}
+  boss(e, dt, t) {
+    moveToward(e, t.x, t.y, e.s, dt);
+    if ((e.cd -= dt) > 0) return;
+    e.cd = 2.6;
+    const a0 = angleTo(e, t);
+    for (let j = 0; j < 14; j++) fire(e, a0 + j * 6.283 / 14, 150, 10);   // ring
+    for (let j = -1; j <= 1; j++) fire(e, a0 + j * 0.18, 260, 12);        // aimed fan
+    playTone(70, 0.3, 'sawtooth', 0.08);
   },
 
-  // 2 – tanky slow chaser
-  2: {
-    update(e, dt, target) {
-      const dx = target.x - e.x, dy = target.y - e.y;
-      const d = len(dx, dy);
-      e.x += dx / d * e.s * dt;
-      e.y += dy / d * e.s * dt;
-    },
-    onDeath(e) {}
+  blinker(e, dt, t) {
+    moveToward(e, t.x, t.y, e.s * 0.35, dt);                  // slow drift while charging
+    if ((e.cd -= dt) > 0) return;
+    const d = len(t.x - e.x, t.y - e.y);
+    if (d > 140) {                                            // blink toward target, never through it
+      moveToward(e, t.x, t.y, Math.min(90 + rng() * 70, d - 60), 1);
+      e.cd = 1.2 + rng() * 0.5;
+    } else e.cd = 0.3;                                        // too close: retry shortly
   },
 
-  // 3 – keep-distance shooter
-  3: {
-    update(e, dt, target) {
-      const dx = target.x - e.x, dy = target.y - e.y;
-      const d = len(dx, dy);
-      let sp = e.s;
-      if (d < 200) sp = -e.s * 0.7;
-      else if (d < 260) sp = 0;
-      e.x += dx / d * sp * dt;
-      e.y += dy / d * sp * dt;
-
-      e.cd -= dt;
-      if (e.cd <= 0 && d < 460) {
-        e.cd = 2;
-        const a = Math.atan2(dy, dx);
-        eBullets.push({
-          x: e.x, y: e.y,
-          vx: Math.cos(a) * 210, vy: Math.sin(a) * 210,
-          d: 6, l: 5
-        });
-      }
-    },
-    onDeath(e) {}
-  },
-
-  // 4 – splitter
-  4: {
-    update(e, dt, target) {
-      const dx = target.x - e.x, dy = target.y - e.y;
-      const d = len(dx, dy);
-      e.x += dx / d * e.s * dt;
-      e.y += dy / d * e.s * dt;
-    },
-    onDeath(e) {
-      for (let i = 0; i < 2; i++) {
-        enemies.push({
-          k: 1, x: e.x + i * 12, y: e.y,
-          r: 7, hp: 8, mh: 8, s: 110, d: 5,
-          c: ENEMY[1].c, cd: 0, fl: 0, oc: 0, lb: null
-        });
-      }
-    }
-  },
-
-  // 5 – boss
-  5: {
-    update(e, dt, target) {
-      const dx = target.x - e.x, dy = target.y - e.y;
-      const d = len(dx, dy);
-      e.x += dx / d * e.s * dt;
-      e.y += dy / d * e.s * dt;
-
-      e.cd -= dt;
-      if (e.cd <= 0) {
-        e.cd = 2.6;
-        const a0 = Math.atan2(dy, dx);
-        for (let j = 0; j < 14; j++) {
-          eBullets.push({
-            x: e.x, y: e.y,
-            vx: Math.cos(a0 + j * 6.283 / 14) * 150,
-            vy: Math.sin(a0 + j * 6.283 / 14) * 150,
-            d: 10, l: 5
-          });
-        }
-        for (let j = -1; j <= 1; j++) {
-          eBullets.push({
-            x: e.x, y: e.y,
-            vx: Math.cos(a0 + j * 0.18) * 260,
-            vy: Math.sin(a0 + j * 0.18) * 260,
-            d: 12, l: 5
-          });
-        }
-        playTone(70, 0.3, 'sawtooth', 0.08);
-      }
-    },
-    onDeath(e) {
-      shake = 14;
-      bossCount++;
-      S.shards += 10;
-    }
-  },
-
-  // Blinker
-  6: {
-    update(e, dt, target) {
-      e.cd = (e.cd || 1.4) - dt;
-      if (e.cd <= 0) {
-        e.cd = 1.2 + rng() * 0.5;
-        const a = Math.atan2(target.y - e.y, target.x - e.x);
-        const dist = 90 + rng() * 70;
-        e.x += Math.cos(a) * dist;
-        e.y += Math.sin(a) * dist;
-        // small trail burst
-        burst(e.x, e.y, e.c, 4);
-      } else {
-        // slow drift while charging
-        const dx = target.x - e.x, dy = target.y - e.y;
-        const d = len(dx, dy);
-        e.x += dx / d * e.s * 0.35 * dt;
-        e.y += dy / d * e.s * 0.35 * dt;
-      }
-    },
-    onDeath(e) {}
-  },
-
-  // Orbit Drone
-  7: {
-    update(e, dt, target) {
-      // initialize orbit angle once
-      if (e.ang === undefined) e.ang = rng() * 6.283;
-      e.ang += 1.1 * dt;
-
-      const desiredR = 210;
-      const tx = target.x + Math.cos(e.ang) * desiredR;
-      const ty = target.y + Math.sin(e.ang) * desiredR;
-      const dx = tx - e.x, dy = ty - e.y;
-      const d = len(dx, dy);
-      e.x += dx / d * e.s * dt;
-      e.y += dy / d * e.s * dt;
-
-      e.cd -= dt;
-      if (e.cd <= 0) {
-        e.cd = 1.6;
-        const a = Math.atan2(target.y - e.y, target.x - e.x);
-        eBullets.push({
-          x: e.x, y: e.y,
-          vx: Math.cos(a) * 240, vy: Math.sin(a) * 240,
-          d: 7, l: 4
-        });
-      }
-    },
-    onDeath(e) {}
+  orbiter(e, dt, t) {
+    const R = 210;
+    if (e.ang === undefined) e.ang = Math.atan2(e.y - t.y, e.x - t.x);   // start on current bearing
+    e.ang += e.s * 0.9 / R * dt;                                           // slower than it can fly
+    moveToward(e, t.x + Math.cos(e.ang) * R, t.y + Math.sin(e.ang) * R, e.s * 1.6, dt);
+    if ((e.cd -= dt) <= 0) { e.cd = 1.6; fire(e, angleTo(e, t), 240, 7, 4); }
   }
+};
+
+const DEATH = {
+  split(e) { for (let i = 0; i < 2; i++) enemies.push(makeEnemy(1, e.x + i * 12, e.y, ENEMY[1].hp)); },
+  boss() { bossCount++; S.shards += 10; }
 };
 
 const UPGRADES = [
@@ -423,8 +317,8 @@ const SHOP = [
 
 /* ========== Runtime state ========== */
 let state = 'title';
-let player, enemies = [], bullets = [], eBullets = [], gems = [], packs = [], particles = [], rings = [];
-let time = 0, kills = 0, level = 1, xp = 0, xpNext = 5, spawnAcc = 0, bossCount = 0, shake = 0;
+let player, enemies = [], bullets = [], eBullets = [], gems = [], packs = [], rings = [];
+let time = 0, kills = 0, level = 1, xp = 0, xpNext = 5, spawnAcc = 0, bossCount = 0;
 let cam = { x: 0, y: 0 }, choices = [], friend = null, runSeed = '', gcTimer = 0;
 let debug = false;
 const keys = {};
@@ -510,7 +404,6 @@ function pauseScreen() {
     <p>Seed <b>${runSeed}</b></p>
     <div class="stats">Best ${S.best}s · Current ${time | 0}s</div>
     <button onclick="resume()">Resume</button>
-    <button onclick="toggle('fx')">Shake & particles: ${S.fx ? 'on' : 'off'}</button>
     <div class="row">
       <button onclick="toggle('mute')">Sound: ${S.mute ? 'off' : 'on'}</button>
       <button onclick="toggle('nm')">Music: ${S.nm ? 'off' : 'on'}</button>
@@ -666,9 +559,9 @@ function start(sd) {
     w: { bolt: 1, orb: 0, nova: 0 },
     cd: 0, ncd: 2, ang: 0, iv: 0
   };
-  enemies = []; bullets = []; eBullets = []; gems = []; packs = []; particles = []; rings = [];
+  enemies = []; bullets = []; eBullets = []; gems = []; packs = []; rings = [];
   time = 0; kills = 0; level = 1; xp = 0; xpNext = 5;
-  spawnAcc = 0; bossCount = 0; shake = 0; gcTimer = 0;
+  spawnAcc = 0; bossCount = 0; gcTimer = 0;
   cam = { x: 0, y: 0 };
   initBot(); startMusic(); hide(); state = 'play';
   playTone(440, 0.15, 'sawtooth');
@@ -703,55 +596,37 @@ function copyShare() {
   $('cd').select();
 }
 
-function burst(x, y, color, n) {
-  return;
-  // // Uncomment below to have blur effect on killEnemy
-  // if (!S.fx || particles.length > 280) return;
-  // for (let i = 0; i < n; i++) {
-  //   const a = rnd01() * 6.28;
-  //   const s = 25 + rnd01() * 55;          // much slower
-  //   particles.push({
-  //     x, y,
-  //     vx: Math.cos(a) * s,
-  //     vy: Math.sin(a) * s,
-  //     l: 0.25 + rnd01() * 0.2,            // shorter life
-  //     c: color
-  //   });
-  // }
+function pickType() {
+  let total = 0;
+  for (const i of SPAWNABLE) if (time >= ENEMY[i].minT) total += ENEMY[i].w;
+  let r = rng() * total;
+  for (const i of SPAWNABLE) {
+    if (time < ENEMY[i].minT) continue;
+    if ((r -= ENEMY[i].w) < 0) return i;
+  }
+  return 0;
 }
 
 function spawnEnemy(isBoss) {
   const a = rng() * 6.283;
   const R = Math.hypot(W, H) / 2 + 60;
-  const k = isBoss ? 5 : Math.min(7, (rng() * (1 + time / 28)) | 0);
+  const k = isBoss ? ENEMY.findIndex(t => t.boss) : pickType();   // regular spawns can never be a boss
   const t = ENEMY[k];
-  const mult = 1 + time / 100;
-  const hp = isBoss ? t.hp * (1 + bossCount * 0.8) : t.hp * mult;
-  enemies.push({
-    k, x: player.x + Math.cos(a) * R, y: player.y + Math.sin(a) * R,
-    r: t.r, hp, mh: hp, s: t.s, d: t.d, c: t.c,
-    cd: 2 + rng(), fl: 0, oc: 0, lb: null
-  });
+  const hp = isBoss ? t.hp * (1 + bossCount * 0.8) : t.hp * (1 + time / 100);
+  enemies.push(makeEnemy(k, player.x + Math.cos(a) * R, player.y + Math.sin(a) * R, hp));
 }
 
 function killEnemy(e) {
   kills++;
-  burst(e.x, e.y, e.c, 8);
-
-  const val = e.k === 5 ? 15 : e.k === 2 ? 3 : 1;
-  for (let i = 0; i < (e.k === 5 ? 10 : 1); i++) {
+  const t = ENEMY[e.k];
+  for (let i = 0; i < (t.gems || 1); i++)
     gems.push({
       x: e.x + (i ? (rnd01() - 0.5) * 60 : 0),
       y: e.y + (i ? (rnd01() - 0.5) * 60 : 0),
-      v: e.k === 5 ? 2 : val
+      v: t.gem || 1
     });
-  }
-
-  // Modular on-death
-  const beh = BEHAVIORS[e.k] || BEHAVIORS[0];
-  beh.onDeath(e);
-
-  if (rng() < 0.025 && e.k !== 5) packs.push({ x: e.x, y: e.y });
+  if (t.death) DEATH[t.death](e);
+  if (!e.boss && rng() < 0.025) packs.push({ x: e.x, y: e.y });
   playTone(180 + rnd01() * 60, 0.05, 'triangle', 0.03);
 }
 
@@ -797,7 +672,9 @@ function buildGrid() {
   }
 }
 
-function near(x, y, r, fn) {
+const hitBuf = [];   // reused result buffer: no closures / allocations in the hot path
+function nearEnemies(x, y, r) {
+  hitBuf.length = 0;
   const gx = ((x - gridOx) / GRID) | 0;
   const gy = ((y - gridOy) / GRID) | 0;
   for (let j = gy - 1; j <= gy + 1; j++)
@@ -806,9 +683,10 @@ function near(x, y, r, fn) {
       const cell = grid[j * GRID_N + i];
       for (let k = 0; k < cell.length; k++) {
         const e = cell[k];
-        if (e.hp > 0 && Math.hypot(e.x - x, e.y - y) < e.r + r && fn(e)) return;
+        if (e.hp > 0 && Math.hypot(e.x - x, e.y - y) < e.r + r) hitBuf.push(e);
       }
     }
+  return hitBuf;
 }
 
 function tick(dt) {
@@ -817,12 +695,11 @@ function tick(dt) {
   let ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
   let iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
   if (joy) { ix += joy.dx; iy += joy.dy; }
-  const [nx, ny] = norm(ix, iy);
+  const [nx, ny] = limit(ix, iy);
   player.x += nx * player.spd * dt;
   player.y += ny * player.spd * dt;
   pushOut(player);
   player.iv -= dt;
-  shake = Math.max(0, shake - dt * 30);
   cam.x += (player.x - cam.x) * 0.12;
   cam.y += (player.y - cam.y) * 0.12;
 
@@ -839,7 +716,7 @@ function tick(dt) {
     spawnAcc--;
     if (enemies.length < 420) spawnEnemy(false);
   }
-  if (time >= 150 * (bossCount + 1) && !enemies.some(e => e.k === 5)) spawnEnemy(true);
+  if (time >= 150 * (bossCount + 1) && !enemies.some(e => e.boss)) spawnEnemy(true);
 
   buildGrid();
 
@@ -873,12 +750,15 @@ function tick(dt) {
     const b = bullets[i];
     b.x += b.vx * dt; b.y += b.vy * dt; b.l -= dt;
     let remove = b.l <= 0;
-    if (!remove) near(b.x, b.y, 4, e => {
-      if (e.lb === b) return false;
-      e.lb = b; damage(e, b.d);
-      if (--b.p < 0) { remove = true; return true; }
-      return false;
-    });
+    if (!remove) {
+      const hits = nearEnemies(b.x, b.y, 4);
+      for (let h = 0; h < hits.length; h++) {
+        const e = hits[h];
+        if (e.lb === b) continue;
+        e.lb = b; damage(e, b.d);
+        if (--b.p < 0) { remove = true; break; }
+      }
+    }
     if (remove) { bullets[i] = bullets[bullets.length - 1]; bullets.pop(); }
   }
 
@@ -888,13 +768,13 @@ function tick(dt) {
     for (let i = 0; i < n; i++) {
       const a = player.ang + i * 6.283 / n;
       const x = player.x + Math.cos(a) * 70, y = player.y + Math.sin(a) * 70;
-      near(x, y, 10, e => {
-        if (e.oc <= 0) {
-          damage(e, 8 * player.dmg * (1 + 0.15 * player.w.orb));
-          e.oc = 0.35;
-        }
-        return false;
-      });
+      const hits = nearEnemies(x, y, 10);
+      for (let h = 0; h < hits.length; h++) {
+        const e = hits[h];
+        if (e.oc > 0) continue;
+        damage(e, 8 * player.dmg * (1 + 0.15 * player.w.orb));
+        e.oc = 0.35;
+      }
     }
   }
 
@@ -929,9 +809,7 @@ function tick(dt) {
       dist2(bot.x, bot.y, e.x, e.y) < dist2(player.x, player.y, e.x, e.y)
         ? bot : player;
 
-    // Modular behavior
-    const beh = BEHAVIORS[e.k] || BEHAVIORS[0];
-    beh.update(e, dt, target);
+    AI[ENEMY[e.k].ai](e, dt, target);
     pushOut(e);
 
     // Keep far-away enemies from drifting forever
@@ -946,7 +824,6 @@ function tick(dt) {
     if (target === player && d < e.r + player.r && player.iv <= 0) {
       player.hp -= e.d;
       player.iv = 0.6;
-      shake = 8;
       playTone(110, 0.12, 'sawtooth', 0.07);
     }
   }
@@ -956,7 +833,7 @@ function tick(dt) {
     b.x += b.vx * dt; b.y += b.vy * dt; b.l -= dt;
     let remove = b.l <= 0;
     if (Math.hypot(b.x - player.x, b.y - player.y) < player.r + 5 && player.iv <= 0) {
-      player.hp -= b.d; player.iv = 0.4; shake = 6; remove = true;
+      player.hp -= b.d; player.iv = 0.4; remove = true;
     }
     if (remove) { eBullets[i] = eBullets[eBullets.length - 1]; eBullets.pop(); }
   }
@@ -980,11 +857,6 @@ function tick(dt) {
     }
   }
 
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    if ((p.l -= dt) <= 0) { particles[i] = particles[particles.length - 1]; particles.pop(); }
-  }
   for (let i = rings.length - 1; i >= 0; i--) {
     rings[i].r += 500 * dt;
     if (rings[i].r >= rings[i].m) rings.splice(i, 1);
@@ -1051,7 +923,7 @@ function draw() {
     case 4: // splitter
       g.strokeStyle = '#7dff3a'; g.stroke(); break;
     case 6: // blinker
-      g.strokeStyle = '#80f0ff'; g.stroke(); break;
+      g.strokeStyle = e.cd < 0.35 ? '#fff' : '#80f0ff'; g.stroke(); break;
     case 7: // orbit
       g.strokeStyle = '#e0b0ff'; g.lineWidth = 1.5;
       g.beginPath(); g.arc(e.x + ox, e.y + oy, e.r + 5, 0, 6.283); g.stroke();
@@ -1059,7 +931,7 @@ function draw() {
     }
 
     // Boss extras (unchanged)
-    if (e.k === 5) {
+    if (e.boss) {
       g.strokeStyle = e.cd < 0.6 ? '#fff' : '#ff2b4a'; g.lineWidth = 4; g.stroke();
       g.fillStyle = '#300'; g.fillRect(e.x + ox - 40, e.y + oy - e.r - 14, 80, 6);
       g.fillStyle = '#ff2b4a'; g.fillRect(e.x + ox - 40, e.y + oy - e.r - 14, 80 * Math.max(0, e.hp / e.mh), 6);
@@ -1093,11 +965,6 @@ function draw() {
     g.beginPath(); g.arc(r.x + ox, r.y + oy, r.r, 0, 6.283); g.stroke();
   }
   g.globalAlpha = 1;
-
-  for (const p of particles) {
-    g.globalAlpha = Math.min(1, p.l * 2.5); g.fillStyle = p.c;
-    g.fillRect(p.x + ox - 2, p.y + oy - 2, 4, 4);
-  }
 
   drawBot(ox, oy);
 
@@ -1195,7 +1062,7 @@ function botSnapshot() {
   const byDist = (a, c) => a.d - c.d;
   for (const e of enemies) {
     const d = Math.hypot(e.x - b.x, e.y - b.y);
-    if (d < 600) en.push({ x: e.x | 0, y: e.y | 0, r: e.r, k: e.k, hp: e.hp | 0, d });
+    if (d < 600) en.push({ x: e.x | 0, y: e.y | 0, r: e.r, k: e.k, boss: !!e.boss, hp: e.hp | 0, d });
   }
   en.sort(byDist); en.length = Math.min(en.length, 40);
   for (const m of gems) {
@@ -1249,7 +1116,7 @@ function botTick(dt) {
     }
   }
   let dx = +botCmd.dx || 0, dy = +botCmd.dy || 0;
-  const [ndx, ndy] = norm(dx, dy);
+  const [ndx, ndy] = limit(dx, dy);
   b.x += ndx * player.spd * 0.9 * dt;
   b.y += ndy * player.spd * 0.9 * dt;
   pushOut(b);
@@ -1279,10 +1146,8 @@ function botTick(dt) {
     } else b.cd = 0.1;
   }
 
-  near(b.x, b.y, b.r, e => {
-    if (b.iv <= 0) { b.hp -= e.d; b.iv = 0.6; }
-    return true;
-  });
+  const touching = nearEnemies(b.x, b.y, b.r);
+  if (touching.length && b.iv <= 0) { b.hp -= touching[0].d; b.iv = 0.6; }
   for (let i = eBullets.length - 1; i >= 0; i--) {
     const q = eBullets[i];
     if (b.iv <= 0 && Math.hypot(q.x - b.x, q.y - b.y) < b.r + 5) {
@@ -1419,7 +1284,7 @@ function musicSched() {
   music.gain.gain.setTargetAtTime(state === 'play' ? 0.5 : 0.18, now, 0.15);
   if (music.next < now - 0.1) music.next = now + 0.05;
   const intensity = Math.min(1, enemies.length / 300 + time / 500);
-  const boss = enemies.some(e => e.k === 5);
+  const boss = enemies.some(e => e.boss);
   const G = currentGenre(boss);
   const stepDur = 15 / (G.b[0] + (G.b[1] - G.b[0]) * intensity + (boss ? 10 : 0));
   while (music.next < now + 0.2) {
