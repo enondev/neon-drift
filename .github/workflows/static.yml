@@ -59,6 +59,5 @@ jobs:
           butler_key: ${{ secrets.BUTLER_API_KEY }}
           itch_user: enondev
           itch_game: neon-drift
-          # Pass the exact zip file directly to the HTML channel
-          files: |
-            html: game.zip
+          channel: html
+          path: index.html
