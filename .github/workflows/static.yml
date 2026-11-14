@@ -57,6 +57,6 @@ jobs:
         with:
           butler_key: ${{ secrets.BUTLER_API_KEY }}
           itch_user: enondev
-          itch_game: neon-drift
+          itch_game: neon-drift:html
           auto_channel: true
           files: ./web.zip
