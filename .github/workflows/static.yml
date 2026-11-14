@@ -42,6 +42,8 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v5
   deploy-itch:
+    environment:
+        name: github-pages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -50,7 +52,7 @@ jobs:
       - name: Push to Itch.io
         uses: Ayowel/butler-to-itch@v2
         with:
-          butler_key: ${{ secrets.BUTLER_API_KEY }}  # Changed from api-key
+          butler_key: ${{ secrets.BUTLER_API_KEY }}
           itch_user: enondev
           itch_game: neon-drift
           files: |                                    # Replaced channel/package with files format
