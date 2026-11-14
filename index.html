@@ -16,6 +16,49 @@ button:hover{background:#2a2470}
 input,textarea{background:#120f2e;color:var(--fg);border:1px solid var(--a);border-radius:8px;padding:9px;font:inherit}
 input{width:190px}.b{color:#ffd02b}
 textarea,input{-webkit-user-select:text;user-select:text}
+#ov {
+  gap: 8px;
+  padding: max(12px, env(safe-area-inset-top)) 14px max(12px, env(safe-area-inset-bottom));
+  max-width: 100%;
+}
+#ov h1 {
+  font-size: clamp(28px, 8vw, 64px);
+  line-height: 1.1;
+}
+#ov p, #ov small {
+  max-width: min(460px, 92vw);
+}
+#ov button {
+  min-width: min(230px, 92vw);
+  max-width: 320px;
+  width: 100%;
+  box-sizing: border-box;
+}
+#ov .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  width: min(460px, 92vw);
+}
+#ov .row button {
+  flex: 1 1 140px;
+  min-width: 140px;
+}
+#ov .stats {
+  font-size: 13px;
+  opacity: 0.85;
+  margin: 4px 0 2px;
+  max-width: min(460px, 92vw);
+}
+#ov input {
+  width: min(190px, 60vw);
+  box-sizing: border-box;
+}
+@media (max-width: 420px) {
+  #ov button { font-size: 14px; padding: 10px 12px; }
+  #ov .stats { font-size: 12px; }
+}
 </style>
 </head>
 <body>
@@ -406,19 +449,27 @@ function titleScreen() {
   const today = new Date().toISOString().slice(0, 10);
   show(`<h1>NEON DRIFT</h1>
     <p>Survive the swarm across an endless procedural grid.</p>
+    <div class="stats">Best ${S.best}s · Daily ${S.daily[new Date().toISOString().slice(0,10)] || 0}s · ${S.runs} runs</div>
     ${friend ? `<p class=b>Friend lasted ${friend.t}s, ${friend.k} kills, level ${friend.l} on seed <b>${friend.s}</b></p>
       <button onclick="start('${friend.s}')">Beat their seed</button>` : ''}
-    <button onclick="start('D${today}')">Daily Challenge · best ${S.daily[today] || 0}s</button>
+    <button onclick="start('D${new Date().toISOString().slice(0,10)}')">Daily Challenge</button>
     <button onclick="start(''+Date.now())">Random Run</button>
-    <div><input id=sd placeholder="seed or friend code"> <button style="min-width:0" onclick="goSeed()">Go</button></div>
-    <button onclick="profileList()">Profile: ${esc(activeName())} · export/import</button>
+    <div class="row">
+      <input id=sd placeholder="seed or friend code">
+      <button style="min-width:0;flex:0 0 auto" onclick="goSeed()">Go</button>
+    </div>
+    <button onclick="profileList()">Profile: ${esc(activeName())}</button>
     <button onclick="shopScreen()">Shard Shop · ${S.shards}◆</button>
-    <button onclick="cycleBot()">Co-op bot: ${['off','built-in AI','custom script'][S.bot || 0]}</button>
-    <button onclick="editBot()">Edit bot script</button>
-    <button onclick="toggle('mute')">Sound: ${S.mute ? 'off' : 'on'}</button>
-    <button onclick="toggle('nm')">Music: ${S.nm ? 'off' : 'on'}</button>
-    <button onclick="cycleGenre()">Genre: ${(S.genre | 0) ? GENRES[S.genre - 1].n : 'Auto (adaptive)'}</button>
-    <small>Best ${S.best}s · ${S.runs} runs · ${S.kills} kills<br>Move: WASD / arrows / drag · Pause: P</small>`);
+    <div class="row">
+      <button onclick="cycleBot()">Bot: ${['off','AI','script'][S.bot || 0]}</button>
+      <button onclick="editBot()">Edit script</button>
+    </div>
+    <div class="row">
+      <button onclick="toggle('mute')">Sound: ${S.mute ? 'off' : 'on'}</button>
+      <button onclick="toggle('nm')">Music: ${S.nm ? 'off' : 'on'}</button>
+    </div>
+    <button onclick="cycleGenre()">Genre: ${(S.genre | 0) ? GENRES[S.genre - 1].n : 'Auto'}</button>
+    <small>Move: WASD / arrows / drag · Pause: P</small>`);
 }
 
 function goSeed() {
@@ -455,11 +506,15 @@ function buyUpgrade(k) {
 
 function pauseScreen() {
   state = 'pause';
-  show(`<h2>Paused</h2><p>Seed <b>${runSeed}</b></p>
+  show(`<h2>Paused</h2>
+    <p>Seed <b>${runSeed}</b></p>
+    <div class="stats">Best ${S.best}s · Current ${time | 0}s</div>
     <button onclick="resume()">Resume</button>
     <button onclick="toggle('fx')">Shake & particles: ${S.fx ? 'on' : 'off'}</button>
-    <button onclick="toggle('mute')">Sound: ${S.mute ? 'off' : 'on'}</button>
-    <button onclick="toggle('nm')">Music: ${S.nm ? 'off' : 'on'}</button>
+    <div class="row">
+      <button onclick="toggle('mute')">Sound: ${S.mute ? 'off' : 'on'}</button>
+      <button onclick="toggle('nm')">Music: ${S.nm ? 'off' : 'on'}</button>
+    </div>
     <button onclick="cycleGenre()">Genre: ${(S.genre | 0) ? GENRES[S.genre - 1].n : 'Auto'}</button>
     <button onclick="titleScreen()">Quit run</button>`);
 }
@@ -631,6 +686,7 @@ function gameOver() {
   playTone(120, 0.5, 'sawtooth', 0.08);
   show(`<h2>Run over</h2>
     <p>${time | 0}s · ${kills} kills · level ${level}</p>
+    <p class=b>${(time | 0) >= S.best ? 'New best!' : `Best ${S.best}s`}</p>
     <p class=b>+${earn}◆ shards</p>
     <p>Share code:</p>
     <input id=cd readonly value="${code}" onclick="this.select()">
@@ -667,7 +723,7 @@ function burst(x, y, color, n) {
 function spawnEnemy(isBoss) {
   const a = rng() * 6.283;
   const R = Math.hypot(W, H) / 2 + 60;
-  const k = isBoss ? 5 : 6 + (rng()*2|0); // only 6 & 7
+  const k = isBoss ? 5 : Math.min(7, (rng() * (1 + time / 28)) | 0);
   const t = ENEMY[k];
   const mult = 1 + time / 100;
   const hp = isBoss ? t.hp * (1 + bossCount * 0.8) : t.hp * mult;
