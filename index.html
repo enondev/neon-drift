@@ -325,6 +325,8 @@ const keys = {};
 const GRID = 64, GRID_N = 30;
 const grid = Array.from({ length: GRID_N * GRID_N }, () => []);
 let gridOx = 0, gridOy = 0, joy = null;
+const trail = [];
+const maxTrailLength = 25;
 
 /* ========== UI ========== */
 const show = html => { $('ov').innerHTML = html; $('ov').style.display = 'flex'; };
@@ -868,6 +870,31 @@ function tick(dt) {
 }
 
 /* ========== Render ========== */
+function updateAndDrawTrail(ox, oy) {
+  if (!player || state !== 'play') return;
+
+  // Track the absolute coordinates of the player
+  trail.unshift({ x: player.x, y: player.y });
+
+  if (trail.length > maxTrailLength) {
+    trail.pop();
+  }
+
+  // Draw fading history dots relative to the current camera view offset
+  for (let i = 0; i < trail.length; i++) {
+    const pt = trail[i];
+    const alpha = 1 - (i / maxTrailLength);
+    const radius = player.r * 0.75 * alpha; // Shrink smoothly towards the tail end
+
+    g.beginPath();
+    g.arc(pt.x + ox, pt.y + oy, radius, 0, 6.283);
+    
+    // Transparent layer matching the bright neon cyan style variable (--b)
+    g.fillStyle = `rgba(25, 230, 255, ${alpha * 0.35})`; 
+    g.fill();
+  }
+}
+
 function draw() {
   if (!player) { g.fillStyle = '#0b0a1a'; g.fillRect(0, 0, W, H); return; }
   const biome = biomeAt(cam.x, cam.y);
@@ -899,6 +926,8 @@ function draw() {
         g.globalAlpha = 1; g.strokeStyle = col; g.lineWidth = 2; g.stroke();
       }
     }
+
+  updateAndDrawTrail(ox, oy);
 
   g.fillStyle = '#19e6ff';
   for (const m of gems) g.fillRect(m.x + ox - 3, m.y + oy - 3, 6, 6);
