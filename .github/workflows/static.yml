@@ -43,7 +43,7 @@ jobs:
         uses: actions/deploy-pages@v5
   deploy-itch:
     environment:
-        name: github-pages
+        name: enondev.itch.io
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
