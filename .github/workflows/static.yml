@@ -60,5 +60,4 @@ jobs:
           itch_user: enondev
           itch_game: neon-drift
           auto_channel: true
-          channel: html
           files: ./index.html
