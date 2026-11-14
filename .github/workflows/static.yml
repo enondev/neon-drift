@@ -50,8 +50,8 @@ jobs:
       - name: Push to Itch.io
         uses: Ayowel/butler-to-itch@v2
         with:
-          api-key: ${{ secrets.BUTLER_API_KEY }}
+          butler_key: ${{ secrets.BUTLER_API_KEY }}  # Changed from api-key
           itch_user: enondev
           itch_game: neon-drift
-          channel: html                      # Tells Itch this is a web game
-          package: '.'                        # Uploads the entire repo (including index.html)
+          files: |                                    # Replaced channel/package with files format
+            html: .
