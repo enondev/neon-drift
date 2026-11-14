@@ -49,14 +49,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Zip repository contents
-        run: zip -r web.zip . -x ".git*" ".github*"
+      # - name: Zip repository contents
+      #   run: zip -r web.zip . -x ".git*" ".github*"
 
       - name: Push to Itch.io
         uses: Ayowel/butler-to-itch@v2
         with:
           butler_key: ${{ secrets.BUTLER_API_KEY }}
           itch_user: enondev
-          itch_game: neon-drift:html
+          itch_game: neon-drift
           auto_channel: true
-          files: ./web.zip
+          files: ./index.html
