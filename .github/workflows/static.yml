@@ -55,5 +55,5 @@ jobs:
           butler_key: ${{ secrets.BUTLER_API_KEY }}
           itch_user: enondev
           itch_game: neon-drift
-          files: |                                    # Replaced channel/package with files format
-            html: .
+          files: "index.html"
+          auto_channel: true
