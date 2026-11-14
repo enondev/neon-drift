@@ -1,5 +1,7 @@
 # Neon Drift
 
+***Personal Highscore***: `eyJzIjoiMTc5NDY3MDc3NTgxOSIsInQiOjE4MDksImsiOjIwNzQ2LCJsIjozMX0=`
+
 ## Gameplay
 
 ![gameplay](assets/gameplay.gif)
