@@ -229,14 +229,15 @@ function pushOut(entity) {
 const ENEMY = [
   /* 0 */ { name: 'Chaser',   ai: 'chase',   hp: 18,  s: 62,  r: 10, d: 8,  c: '#ff2bd6', minT: 0,   w: 1 },
   /* 1 */ { name: 'Swarmer',  ai: 'chase',   hp: 8,   s: 110, r: 7,  d: 5,  c: '#ffd02b', minT: 28,  w: 1 },
-  /* 2 */ { name: 'Tank',     ai: 'chase',   hp: 90,  s: 40,  r: 18, d: 14, c: '#ff6a2b', minT: 56,  w: 1, gem: 3 },
+  /* 2 */ { name: 'Tank',     ai: 'chase',   hp: 90,  s: 40,  r: 18, d: 14, c: '#ff6a2b', minT: 56,  w: 1, gem: (3 * level) },
   /* 3 */ { name: 'Shooter',  ai: 'shooter', hp: 26,  s: 50,  r: 10, d: 6,  c: '#b36bff', minT: 84,  w: 1 },
   /* 4 */ { name: 'Splitter', ai: 'chase',   hp: 40,  s: 55,  r: 14, d: 9,  c: '#7dff3a', minT: 112, w: 1, death: 'split' },
-  /* 5 */ { name: 'Boss',     ai: 'boss',    hp: 900, s: 50,  r: 42, d: 20, c: '#ff2b4a', boss: true, gem: 2, gems: 10, death: 'boss' },
+  /* 5 */ { name: 'Boss',     ai: 'boss',    hp: 900, s: 50,  r: 42, d: 20, c: '#ff2b4a', boss: true, gem: 2, gems: (10 * level), death: 'boss' },
   /* 6 */ { name: 'Blinker',  ai: 'blinker', hp: 22,  s: 70,  r: 9,  d: 7,  c: '#00e5ff', minT: 140, w: 1 },
   /* 7 */ { name: 'Orbiter',  ai: 'orbiter', hp: 28,  s: 80,  r: 11, d: 6,  c: '#c77dff', minT: 168, w: 1 }
 ];
 const SPAWNABLE = ENEMY.map((_, i) => i).filter(i => !ENEMY[i].boss);
+const PACK_LIFE = 20;   // seconds a health pack stays on the field (no hoarding)
 
 const moveToward = (e, tx, ty, speed, dt) => {
   const dx = tx - e.x, dy = ty - e.y, d = len(dx, dy);
@@ -295,7 +296,7 @@ const AI = {
 
 const DEATH = {
   split(e) { for (let i = 0; i < 2; i++) enemies.push(makeEnemy(1, e.x + i * 12, e.y, ENEMY[1].hp)); },
-  boss() { bossCount++; S.shards += 10; }
+  boss() { bossCount++; S.shards += (10 * level); }
 };
 
 const UPGRADES = [
@@ -629,7 +630,7 @@ function killEnemy(e) {
       v: t.gem || 1
     });
   if (t.death) DEATH[t.death](e);
-  if (!e.boss && rng() < 0.025) packs.push({ x: e.x, y: e.y });
+  if (!e.boss && rng() < 0.025) packs.push({ x: e.x, y: e.y, life: PACK_LIFE });
   playTone(180 + rnd01() * 60, 0.05, 'triangle', 0.03);
 }
 
@@ -717,9 +718,9 @@ function tick(dt) {
   spawnAcc += dt * (1 + time / 90 + Math.max(0, time - 600) / 60);
   while (spawnAcc >= 1) {
     spawnAcc--;
-    if (enemies.length < 420) spawnEnemy(false);
+    if (enemies.length < (420 * level)) spawnEnemy(false);
   }
-  if (time >= 150 * (bossCount + 1) && !enemies.some(e => e.boss)) spawnEnemy(true);
+  if (time >= 150 * (bossCount + (1 * level)) && !enemies.some(e => e.boss)) spawnEnemy(true);
 
   buildGrid();
 
@@ -853,6 +854,7 @@ function tick(dt) {
   }
 
   for (let i = packs.length - 1; i >= 0; i--) {
+    if ((packs[i].life -= dt) <= 0) { packs.splice(i, 1); continue; }
     if (Math.hypot(player.x - packs[i].x, player.y - packs[i].y) < 24) {
       player.hp = Math.min(player.mhp, player.hp + 30);
       packs.splice(i, 1);
@@ -933,7 +935,7 @@ function draw() {
   g.fillStyle = '#19e6ff';
   for (const m of gems) g.fillRect(m.x + ox - 3, m.y + oy - 3, 6, 6);
   g.fillStyle = '#4dff88';
-  for (const p of packs) { g.beginPath(); g.arc(p.x + ox, p.y + oy, 8, 0, 6.283); g.fill(); }
+  for (const p of packs) { if (p.life < 5 && ((p.life * 4) | 0) % 2) continue; g.beginPath(); g.arc(p.x + ox, p.y + oy, 8, 0, 6.283); g.fill(); }
 
   for (const e of enemies) {
   g.fillStyle = e.fl > 0 ? '#fff' : e.c;
@@ -1009,7 +1011,7 @@ function draw() {
   g.fillStyle = '#0008'; g.fillRect(0, 0, W, 5);
   g.fillStyle = '#19e6ff'; g.fillRect(0, 0, W * Math.min(1, xp / xpNext), 5);
   g.fillStyle = '#e8e6ff'; g.font = '14px system-ui';
-  g.fillText(`Lv ${level}  ·  ${time / 60 | 0}:${String(time % 60 | 0).padStart(2, '0')}  ·  ${kills} kills  ·  ${biome.n}`, 10, 40);
+  g.fillText(`Lv ${level}  ·  ${time / 60 | 0}:${String(time % 60 | 0).padStart(2, '0')}  ·  ${kills} kills  ·  ${enemies.length} enemies ·  ${biome.n}`, 10, 40);
   g.fillText(`Bolt ${player.w.bolt}  Blades ${player.w.orb}  Nova ${player.w.nova}`, 10, 58);
   if (bot) g.fillText(`Bot: ${bot.down ? 'DOWN - stand near to revive' : Math.ceil(bot.hp) + ' HP'}${botMsg ? ' · ' + botMsg : ''}`, 10, 76);
   if (joy) {
