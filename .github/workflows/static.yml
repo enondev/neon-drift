@@ -49,9 +49,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # - name: Zip repository contents
-      #   run: zip -r web.zip . -x ".git*" ".github*"
-
       - name: Push to Itch.io
         uses: Ayowel/butler-to-itch@v2
         with:
