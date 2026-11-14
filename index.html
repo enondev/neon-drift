@@ -565,6 +565,7 @@ function start(sd) {
   time = 0; kills = 0; level = 1; xp = 0; xpNext = 5;
   spawnAcc = 0; bossCount = 0; gcTimer = 0;
   cam = { x: 0, y: 0 };
+  trail.length = 0;
   initBot(); startMusic(); hide(); state = 'play';
   playTone(440, 0.15, 'sawtooth');
 }
