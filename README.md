@@ -1,6 +1,6 @@
 # Neon Drift
 
-***Personal Highscore***: `eyJzIjoiMTc5NDY3MDc3NTgxOSIsInQiOjE4MDksImsiOjIwNzQ2LCJsIjozMX0=`
+***Personal Highscore***: `eyJzIjoiMTc5NDcyMDEwODYyOSIsInQiOjEwNTQsImsiOjQxOTMsImwiOjMzfQ==`
 
 ## Gameplay
 
