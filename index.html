@@ -229,12 +229,12 @@ function pushOut(entity) {
 const ENEMY = [
   /* 0 */ { name: 'Chaser',   ai: 'chase',   hp: 18,  s: 62,  r: 10, d: 8,  c: '#ff2bd6', minT: 0,   w: 1 },
   /* 1 */ { name: 'Swarmer',  ai: 'chase',   hp: 8,   s: 110, r: 7,  d: 5,  c: '#ffd02b', minT: 28,  w: 1 },
-  /* 2 */ { name: 'Tank',     ai: 'chase',   hp: 90,  s: 40,  r: 18, d: 14, c: '#ff6a2b', minT: 56,  w: 1, gem: (3 * level) },
-  /* 3 */ { name: 'Shooter',  ai: 'shooter', hp: 26,  s: 50,  r: 10, d: 6,  c: '#b36bff', minT: 84,  w: 1 },
+  /* 2 */ { name: 'Tank',     ai: 'chase',   hp: 90,  s: 40,  r: 18, d: 14, c: '#ff6a2b', minT: 56,  w: 1, gem: 3 },
+  /* 3 */ { name: 'Shooter',  ai: 'shooter', hp: 26,  s: 50,  r: 10, d: 6,  c: '#b36bff', minT: 150,  w: 1 },
   /* 4 */ { name: 'Splitter', ai: 'chase',   hp: 40,  s: 55,  r: 14, d: 9,  c: '#7dff3a', minT: 112, w: 1, death: 'split' },
-  /* 5 */ { name: 'Boss',     ai: 'boss',    hp: 900, s: 50,  r: 42, d: 20, c: '#ff2b4a', boss: true, gem: 2, gems: (10 * level), death: 'boss' },
-  /* 6 */ { name: 'Blinker',  ai: 'blinker', hp: 22,  s: 70,  r: 9,  d: 7,  c: '#00e5ff', minT: 140, w: 1 },
-  /* 7 */ { name: 'Orbiter',  ai: 'orbiter', hp: 28,  s: 80,  r: 11, d: 6,  c: '#c77dff', minT: 168, w: 1 }
+  /* 5 */ { name: 'Boss',     ai: 'boss',    hp: 900, s: 50,  r: 42, d: 20, c: '#ff2b4a', boss: true, gem: 2, gems: 10, death: 'boss' },
+  /* 6 */ { name: 'Blinker',  ai: 'blinker', hp: 22,  s: 70,  r: 9,  d: 7,  c: '#00e5ff', minT: 200, w: 1 },
+  /* 7 */ { name: 'Orbiter',  ai: 'orbiter', hp: 28,  s: 80,  r: 11, d: 6,  c: '#c77dff', minT: 240, w: 1 }
 ];
 const SPAWNABLE = ENEMY.map((_, i) => i).filter(i => !ENEMY[i].boss);
 const PACK_LIFE = 20;   // seconds a health pack stays on the field (no hoarding)
@@ -246,7 +246,7 @@ const moveToward = (e, tx, ty, speed, dt) => {
 };
 const angleTo = (e, t) => Math.atan2(t.y - e.y, t.x - e.x);
 const fire = (e, angle, speed, dmg, life = 5) => eBullets.push({
-  x: e.x, y: e.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, d: dmg, l: life
+  x: e.x, y: e.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, d: dmg * (e.dm || 1), l: life
 });
 
 function makeEnemy(k, x, y, hp) {
@@ -296,7 +296,22 @@ const AI = {
 
 const DEATH = {
   split(e) { for (let i = 0; i < 2; i++) enemies.push(makeEnemy(1, e.x + i * 12, e.y, ENEMY[1].hp)); },
-  boss() { bossCount++; S.shards += (10 * level); }
+  boss() { bossCount++; S.shards += TUNE.bossShards(bossCount); }
+};
+
+/* ========== Scaling: every curve in one place. t = seconds survived, lv = player level, n = bosses killed ========== */
+const TUNE = {
+  xpNeed:      lv => Math.floor(3 + lv * 2 + lv * lv * 0.4),             // XP needed to go from level lv to lv + 1
+  passiveGain: n  => Math.pow(0.92, n - 1),                               // diminishing returns on stacked passives
+  spawnRate:   t  => 1 + t / 90 + Math.pow(Math.max(0, t - 600) / 300, 2),   // enemies per second
+  hpMult:      t  => 1 + t / 200 + Math.pow(Math.max(0, t - 480) / 360, 2),  // regular enemy HP multiplier
+  speedMult:   t  => 1 + Math.min(0.8, Math.max(0, t - 300) / 1200),      // enemies speed up to +80%
+  eliteChance: t  => Math.min(0.4, Math.max(0, t - 200) / 2400),          // elites: 4x HP, bigger, 3x XP
+  enemyCap:    t  => 420,
+  bossAt:      n  => 150 * (n + 1),
+  bossHp:      n  => 1 + n * 0.8 + n * n * 0.1,
+  dmgMult:     t  => 1 + Math.max(0, t - 360) / 360,                      // enemy contact + bullet damage: the late-game ceiling
+  bossShards:  n  => 10 + 2 * n
 };
 
 const UPGRADES = [
@@ -633,8 +648,14 @@ function spawnEnemy(isBoss) {
   const R = Math.hypot(W, H) / 2 + 60;
   const k = isBoss ? ENEMY.findIndex(t => t.boss) : pickType();   // regular spawns can never be a boss
   const t = ENEMY[k];
-  const hp = isBoss ? t.hp * (1 + bossCount * 0.8) : t.hp * (1 + time / 160 + Math.max(0, time - 600) / 200);
-  enemies.push(makeEnemy(k, player.x + Math.cos(a) * R, player.y + Math.sin(a) * R, hp));
+  const hp = isBoss ? t.hp * TUNE.bossHp(bossCount) : t.hp * TUNE.hpMult(time);
+  const e = makeEnemy(k, player.x + Math.cos(a) * R, player.y + Math.sin(a) * R, hp);
+  if (!isBoss) {
+    e.s *= TUNE.speedMult(time);
+    if (rng() < TUNE.eliteChance(time)) { e.elite = true; e.hp = e.mh = hp * 4; e.r *= 1.25; e.s *= 1.1; }   // elite: tougher, bigger, 3x XP
+  }
+  e.dm = TUNE.dmgMult(time); e.d *= e.dm;                   // enemies hit harder over time (contact and bullets)
+  enemies.push(e);
 }
 
 function killEnemy(e) {
@@ -644,7 +665,7 @@ function killEnemy(e) {
     gems.push({
       x: e.x + (i ? (rnd01() - 0.5) * 60 : 0),
       y: e.y + (i ? (rnd01() - 0.5) * 60 : 0),
-      v: t.gem || 1
+      v: (t.gem || 1) * (e.elite ? 3 : 1)
     });
   if (t.death) DEATH[t.death](e);
   if (!e.boss && rng() < 0.025) packs.push({ x: e.x, y: e.y, life: PACK_LIFE });
@@ -654,7 +675,8 @@ function killEnemy(e) {
 function damage(e, d) { e.hp -= d; e.fl = 0.07; }
 
 function levelUp() {
-  level++; xp -= xpNext; xpNext = Math.floor(xpNext * 1.22 + 2);
+  level++; xp -= xpNext; xpNext = TUNE.xpNeed(level);
+  player.mhp += 3; player.hp = Math.min(player.mhp, player.hp + player.mhp * 0.1);   // small heal + HP per level
   const owned = Object.keys(player.w).filter(k => player.w[k] > 0).length;
   const pool = UPGRADES.filter(u => u.p || (player.w[u.id] < 6 && (player.w[u.id] > 0 || owned < MAX_WEAPONS)));
   const evos = Object.keys(EVO).filter(k => player.w[k] >= 6 && !player.evo[k] && (player.pc[EVO[k].p] || 0) >= 2)
@@ -677,14 +699,14 @@ function pickUpgrade(id) {
   const up = UPGRADES.find(u => u.id === id);
   if (up && up.p) player.pc[id] = (player.pc[id] || 0) + 1;
   if (id.startsWith('evo_')) player.evo[id.slice(4)] = 1;
-  else if (id === 'area') player.area *= 1.15;
+  else if (id === 'area') player.area *= 1 + 0.15 * TUNE.passiveGain(player.pc.area);
   else if (id === 'regen') player.regen += 0.4;
   if (player.w[id] !== undefined) player.w[id]++;
-  else if (id === 'spd') player.spd *= 1.12;
-  else if (id === 'dmg') player.dmg *= 1.2;
-  else if (id === 'rate') player.rate *= 1.15;
+  else if (id === 'spd') player.spd *= 1 + 0.12 * TUNE.passiveGain(player.pc.spd);
+  else if (id === 'dmg') player.dmg *= 1 + 0.2 * TUNE.passiveGain(player.pc.dmg);
+  else if (id === 'rate') player.rate *= 1 + 0.15 * TUNE.passiveGain(player.pc.rate);
   else if (id === 'hp') { player.mhp += 25; player.hp = Math.min(player.mhp, player.hp + 25); }
-  else if (id === 'mag') player.mag *= 1.4;
+  else if (id === 'mag') player.mag *= 1 + 0.4 * TUNE.passiveGain(player.pc.mag);
   hide(); state = 'play';
 }
 
@@ -741,12 +763,12 @@ function tick(dt) {
         chunks.delete(k);
   }
 
-  spawnAcc += dt * (1 + time / 90 + Math.max(0, time - 600) / 60);
+  spawnAcc += dt * TUNE.spawnRate(time);
   while (spawnAcc >= 1) {
     spawnAcc--;
-    if (enemies.length < (420 * level)) spawnEnemy(false);
+    if (enemies.length < TUNE.enemyCap(time)) spawnEnemy(false);
   }
-  if (time >= 150 * (bossCount + (1 * level)) && !enemies.some(e => e.boss)) spawnEnemy(true);
+  if (time >= TUNE.bossAt(bossCount) && !enemies.some(e => e.boss)) spawnEnemy(true);
 
   buildGrid();
 
@@ -1064,6 +1086,7 @@ function draw() {
       break;
     }
 
+    if (e.elite) { g.save(); g.strokeStyle = '#ffd02b'; g.lineWidth = 3; g.stroke(); g.restore(); }
     // Boss extras (unchanged)
     if (e.boss) {
       g.strokeStyle = e.cd < 0.6 ? '#fff' : '#ff2b4a'; g.lineWidth = 4; g.stroke();
