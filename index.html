@@ -462,6 +462,7 @@ function titleScreen() {
       <button onclick="mutScreen()">Mutators${S.mut ? ' ×' + maskBonus(S.mut).toFixed(2) : ''}</button>
     </div>
     <button onclick="achScreen()">Achievements ${Object.keys(S.ach).length}/${ACH.length}</button>
+    <button onclick="mpScreen()">Multiplayer</button>
     <div class="row">
       <button onclick="cycleBot()">Bot: ${['off','AI','script'][S.bot || 0]}</button>
       <button onclick="editBot()">Edit script</button>
@@ -1604,6 +1605,212 @@ function musicSched() {
 
 /* ========== Main loop & input ========== */
 let acc = 0, last = 0;
+/* ========== Multiplayer, stage M1: lobby + transport ==========
+   Star topology: the host runs the simulation, clients connect to the host only.
+   Transports share one interface (host/join/send/kick/close) so PeerJS can be swapped:
+   peerTransport() = PeerJS over WebRTC, localTransport() = BroadcastChannel between tabs (testing). */
+const NET_VER = 1, MP_MAX = 8;
+const PEER_SRC = 'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js';
+const QR_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';
+let pendingRoom = '', mpMax = 4, mpLocal = false, net = null;
+const roomCode = () => Array.from({ length: 5 }, () => 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[(Math.random() * 31) | 0]).join('');
+const cleanRoom = x => String(x).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
+
+const scriptCache = new Map();
+const loadScript = src => {
+  if (!scriptCache.has(src)) scriptCache.set(src, new Promise((res, rej) => {
+    const el = document.createElement('script');
+    el.src = src; el.onload = res; el.onerror = () => { scriptCache.delete(src); rej(new Error('load ' + src)); };
+    document.head.appendChild(el);
+  }));
+  return scriptCache.get(src);
+};
+
+function peerTransport() {
+  let peer = null; const conns = new Map();
+  const wire = (c, h, id) => { c.on('data', m => h.msg(id, m)); c.on('close', () => { conns.delete(id); h.close(id); }); c.on('error', () => {}); };
+  return {
+    async host(code, h) {
+      try { if (typeof Peer === 'undefined') await loadScript(PEER_SRC); } catch { return h.error('net'); }
+      peer = new Peer('neondrift-' + code);
+      peer.on('open', () => h.ready());
+      peer.on('error', e => h.error(e && e.type === 'unavailable-id' ? 'code-taken' : 'net'));
+      peer.on('connection', c => c.on('open', () => { conns.set(c.peer, c); wire(c, h, c.peer); h.open(c.peer); }));
+    },
+    async join(code, h) {
+      try { if (typeof Peer === 'undefined') await loadScript(PEER_SRC); } catch { return h.error('net'); }
+      peer = new Peer();
+      peer.on('error', e => h.error(e && e.type === 'peer-unavailable' ? 'no-room' : 'net'));
+      peer.on('open', () => {
+        const c = peer.connect('neondrift-' + code, { reliable: true, serialization: 'json' });
+        c.on('open', () => { conns.set('host', c); wire(c, h, 'host'); h.ready(); });
+      });
+    },
+    send(to, m) { const c = conns.get(to); if (c && c.open) c.send(m); },
+    kick(id) { const c = conns.get(id); if (c) c.close(); },
+    close() { conns.forEach(c => { try { c.close(); } catch {} }); conns.clear(); if (peer) peer.destroy(); peer = null; }
+  };
+}
+
+function localTransport() {
+  let ch = null, role = '', hh = null;
+  const me = 'p' + Math.random().toString(36).slice(2, 8);
+  return {
+    async host(code, h) {
+      role = 'host'; hh = h; ch = new BroadcastChannel('neondrift-' + code);
+      ch.onmessage = e => {
+        const m = e.data;
+        if (m.k === 'hi') h.open(m.from); else if (m.k === 'bye') h.close(m.from); else if (m.k === 'd' && m.to === 'host') h.msg(m.from, m.d);
+      };
+      h.ready();
+    },
+    async join(code, h) {
+      role = 'client'; hh = h; ch = new BroadcastChannel('neondrift-' + code);
+      ch.onmessage = e => {
+        const m = e.data;
+        if (m.to !== me) return;
+        if (m.k === 'd') h.msg('host', m.d); else if (m.k === 'bye') h.close('host');
+      };
+      ch.postMessage({ k: 'hi', from: me }); h.ready();
+    },
+    send(to, d) { if (ch) ch.postMessage(role === 'host' ? { k: 'd', to, from: 'host', d } : { k: 'd', to: 'host', from: me, d }); },
+    kick(id) { if (ch) ch.postMessage({ k: 'bye', to: id }); },
+    close() { if (ch) { if (role === 'client') ch.postMessage({ k: 'bye', from: me }); ch.close(); ch = null; } }
+  };
+}
+
+function createNet(kind) {
+  const n = { kind, role: 'solo', code: '', max: 4, idx: 0, lobby: [], status: '', tr: null, rtt: 0, last: 0, timer: 0,
+              onChange() {}, onStart() {}, onLost() {}, onMsg() {} };
+  const now = () => performance.now();
+  const sendTo = (id, m) => { if (n.tr) n.tr.send(id, m); };
+  const free = () => { for (let i = 1; i < n.max; i++) if (!n.lobby.some(p => p.idx === i)) return i; return -1; };
+  const pub = () => n.lobby.map(p => ({ idx: p.idx, name: p.name, ping: p.ping }));
+  const cast = () => { for (const p of n.lobby) if (p.id !== 'host') sendTo(p.id, { t: 'lobby', list: pub(), max: n.max, code: n.code }); n.onChange(); };
+  const nameOf = v => String(v || 'Player').replace(/[^\w \-.]/g, '').trim().slice(0, 16) || 'Player';
+  const drop = id => { const i = n.lobby.findIndex(p => p.id === id); if (i > 0) { n.lobby.splice(i, 1); cast(); } };
+
+  const hostMsg = (id, m) => {
+    if (!m || typeof m !== 'object') return;
+    const p = n.lobby.find(q => q.id === id);
+    if (p) p.seen = now();
+    if (m.t === 'hello') {
+      if (p) return;
+      if (m.v !== NET_VER) return sendTo(id, { t: 'reject', why: 'Version mismatch: refresh the page.' });
+      const idx = free();
+      if (idx < 0) return sendTo(id, { t: 'reject', why: 'The lobby is full.' });
+      let nm = nameOf(m.name);                                   // keep names unique in the lobby
+      if (n.lobby.some(q => q.name === nm)) nm = (nm.slice(0, 12) + ' ' + (idx + 1)).trim();
+      n.lobby.push({ idx, id, name: nm, ping: 0, seen: now() });
+      sendTo(id, { t: 'welcome', idx, code: n.code }); cast();
+    } else if (m.t === 'ping') { if (p) { p.ping = Math.min(999, m.rtt | 0); sendTo(id, { t: 'pong', ts: m.ts }); } }
+    else if (m.t === 'leave') drop(id);
+    else if (p) n.onMsg(p, m);                    // gameplay messages (later stages)
+  };
+  const clientMsg = m => {
+    if (!m || typeof m !== 'object') return;
+    n.last = now();
+    if (m.t === 'welcome') { n.idx = m.idx | 0; n.status = 'In lobby.'; n.onChange(); }
+    else if (m.t === 'lobby') { n.lobby = (m.list || []).slice(0, MP_MAX).map(p => ({ idx: p.idx | 0, name: nameOf(p.name), ping: p.ping | 0 })); n.max = m.max | 0; n.onChange(); }
+    else if (m.t === 'reject') { const w = String(m.why).slice(0, 80); n.leave(); n.onLost(w); }
+    else if (m.t === 'kick') { n.leave(); n.onLost('You were removed by the host.'); }
+    else if (m.t === 'closed') { n.leave(); n.onLost('The host closed the lobby.'); }
+    else if (m.t === 'pong') n.rtt = Math.round(now() - m.ts);
+    else if (m.t === 'start') n.onStart(m);
+    else n.onMsg(null, m);
+  };
+
+  n._hostMsg = hostMsg;
+  n.leave = () => {
+    if (n.tr) { try { if (n.role === 'host') n.lobby.forEach(p => p.id !== 'host' && sendTo(p.id, { t: 'closed' })); if (n.role === 'client') sendTo('host', { t: 'leave' }); n.tr.close(); } catch {} }
+    if (n.timer) clearInterval(n.timer);
+    n.timer = 0; n.tr = null; n.role = 'solo'; n.lobby = []; n.idx = 0;
+  };
+  n.host = async (max, tries = 0) => {
+    n.leave(); n.role = 'host'; n.max = clamp(max | 0, 2, MP_MAX); n.code = roomCode(); n.idx = 0; n.status = 'Opening lobby…';
+    n.lobby = [{ idx: 0, id: 'host', name: nameOf(activeName()), ping: 0, seen: now() }];
+    n.tr = n.kind === 'local' ? localTransport() : peerTransport();
+    if (typeof setInterval === 'function') n.timer = setInterval(() => n.tick(), 1000);
+    await n.tr.host(n.code, {
+      ready: () => { n.status = 'Waiting for players…'; n.onChange(); },
+      error: e => { if (e === 'code-taken' && tries < 3) n.host(max, tries + 1); else { const w = 'Could not open a lobby. Strict networks can block peer connections.'; n.leave(); n.onLost(w); } },
+      open: () => {}, msg: hostMsg, close: drop
+    });
+  };
+  n.join = async code => {
+    n.leave(); n.role = 'client'; n.code = cleanRoom(code); n.status = 'Connecting…'; n.last = now();
+    n.tr = n.kind === 'local' ? localTransport() : peerTransport();
+    if (typeof setInterval === 'function') n.timer = setInterval(() => n.tick(), 1000);
+    await n.tr.join(n.code, {
+      ready: () => { n.status = 'Joining lobby…'; sendTo('host', { t: 'hello', v: NET_VER, name: nameOf(activeName()) }); n.onChange(); },
+      error: e => { const w = e === 'no-room' ? 'No lobby with that code.' : 'Connection failed. Strict networks can block peer connections.'; n.leave(); n.onLost(w); },
+      msg: (id, m) => clientMsg(m),
+      close: () => { if (n.role === 'client') { n.leave(); n.onLost('Host disconnected.'); } }
+    });
+  };
+  n.kick = idx => { const p = n.lobby.find(q => q.idx === idx && q.id !== 'host'); if (p) { sendTo(p.id, { t: 'kick' }); n.tr.kick(p.id); drop(p.id); } };
+  n.start = seed => { const m = { t: 'start', seed, players: pub() }; n.lobby.forEach(p => p.id !== 'host' && sendTo(p.id, m)); n.onStart(m); };
+  n.tick = () => {                                 // 1 Hz: ping, timeouts
+    if (n.role === 'client') {
+      sendTo('host', { t: 'ping', ts: now(), rtt: n.rtt });
+      if (now() - n.last > 10000) { n.leave(); n.onLost('Lost connection to the host.'); }
+    } else if (n.role === 'host') {
+      for (const p of n.lobby.slice(1)) if (now() - p.seen > 10000) n.kick(p.idx);
+      cast();
+    }
+  };
+  return n;
+}
+
+/* ----- lobby UI ----- */
+async function drawQR(text) {
+  try {
+    if (typeof qrcode === 'undefined') await loadScript(QR_SRC);
+    const c = $('qr'); if (!c) return;
+    const q = qrcode(0, 'M'); q.addData(text); q.make();
+    const k = q.getModuleCount(), px = Math.floor(c.width / (k + 2)), x = c.getContext('2d');
+    x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.fillStyle = '#000';
+    for (let r = 0; r < k; r++) for (let q2 = 0; q2 < k; q2++) if (q.isDark(r, q2)) x.fillRect((q2 + 1) * px, (r + 1) * px, px, px);
+  } catch { const c = $('qr'); if (c) c.style.display = 'none'; }
+}
+function mpScreen(msg) {
+  state = 'title';
+  show(`<h2>Multiplayer</h2><p class=b>${esc(msg || '')}</p>
+    <button onclick="mpHost()">Host game</button>
+    <button onclick="mpMax = mpMax % ${MP_MAX} + 1; if (mpMax < 2) mpMax = 2; mpScreen()">Max players: ${mpMax}</button>
+    <div class="row"><input id=rc placeholder="room code" maxlength=5 style="text-transform:uppercase">
+      <button style="min-width:0;flex:0 0 auto" onclick="mpJoinCode($('rc').value)">Join</button></div>
+    <button onclick="mpLocal = !mpLocal; mpScreen()">Transport: ${mpLocal ? 'Local tabs (test)' : 'Internet (PeerJS)'}</button>
+    <small>Strict networks (corporate, some mobile) can block peer connections.</small>
+    <button onclick="titleScreen()">Back</button>`);
+}
+function mpWire() {
+  net.onChange = () => { if (net.role !== 'solo' && state === 'lobby') lobbyScreen(); };
+  net.onLost = msg => { state = 'title'; mpScreen(msg); };
+  net.onStart = m => startCoop(m);
+}
+function mpHost() { net = createNet(mpLocal ? 'local' : 'peer'); mpWire(); state = 'lobby'; lobbyScreen(); net.host(mpMax); }
+function mpJoinCode(code) {
+  code = cleanRoom(code); if (code.length !== 5) return mpScreen('Enter the 5-character room code.');
+  net = createNet(mpLocal ? 'local' : 'peer'); mpWire(); state = 'lobby'; lobbyScreen(); net.join(code);
+}
+function lobbyScreen() {
+  const host = net.role === 'host', link = location.href.split('#')[0] + '#room=' + net.code;
+  show(`<h2>Lobby · ${esc(net.code)}</h2><p><small>${esc(net.status)}</small></p>
+    ${host ? `<canvas id=qr width=180 height=180 style="background:#fff;border-radius:8px"></canvas>
+      <input id=lk readonly value="${esc(link)}" onclick="this.select()"><button onclick="mpCopy()">Copy invite link</button>` : ''}
+    <div style="text-align:left;min-width:min(86vw,320px)">${net.lobby.map(p => `<p>${p.idx === 0 ? '👑 ' : ''}<b>${esc(p.name)}</b> <small>${p.idx === net.idx ? 'you' : p.ping + ' ms'}</small>${host && p.idx ? ` <button style="min-width:0;padding:2px 10px" onclick="net.kick(${p.idx})">kick</button>` : ''}</p>`).join('')}</div>
+    <small>${net.lobby.length}/${net.max} players</small>
+    ${host ? '<button onclick="mpStart()">Start game</button>' : '<p>Waiting for the host to start…</p>'}
+    <button onclick="mpLeave()">Leave</button>`);
+  if (host) drawQR(link);
+}
+function mpCopy() { const l = $('lk'); l.select(); try { navigator.clipboard.writeText(l.value); } catch {} }
+function mpStart() { if (net.role === 'host') net.start('MP' + Date.now().toString(36)); }
+function mpLeave() { net.leave(); state = 'title'; mpScreen(); }
+/* Stage M1 placeholder: every player starts their own run on the shared seed. Stage M2 replaces this with synced co-op. */
+function startCoop(m) { S.bot = 0; start(m.seed); const t = $('toast'); t.innerHTML = 'Lobby works. Live co-op sync arrives in the next stage; this run is independent.'; t.style.display = 'block'; if (typeof setTimeout === 'function') setTimeout(() => { t.style.display = 'none'; }, 4000); }
+
 function frame(t) {
   requestAnimationFrame(frame);
   const d = Math.min((t - last) / 1000, 0.1);
@@ -1680,9 +1887,11 @@ try {
   const h = location.hash;
   if (h.startsWith('#r=')) friend = decodeFriend(h.slice(3));
   else if (h.startsWith('#seed=')) friend = { s: cleanSeed(h.slice(6)), t: 0, k: 0, l: 0 };
+  else if (h.startsWith('#room=')) pendingRoom = cleanRoom(h.slice(6));
 } catch {}
 
 titleScreen();
+if (pendingRoom) mpJoinCode(pendingRoom);   // invite link / QR code
 requestAnimationFrame(frame);
 </script>
 </body>
