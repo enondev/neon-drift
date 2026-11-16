@@ -59,12 +59,14 @@ textarea,input{-webkit-user-select:text;user-select:text}
   #ov button { font-size: 14px; padding: 10px 12px; }
   #ov .stats { font-size: 12px; }
 }
+#pk{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);display:none;z-index:15;background:#120f2ecc;border:1px solid var(--b);border-radius:12px;padding:8px 12px;text-align:center}
+#pk button{min-width:0;margin:3px;padding:8px 12px}
 #toast{position:fixed;top:12px;left:50%;transform:translateX(-50%);display:none;z-index:20;background:#1b1740;border:1px solid var(--a);border-radius:10px;padding:10px 18px;text-align:center;box-shadow:0 0 18px #ff2bd666;pointer-events:none}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="ov"></div><div id="toast"></div>
+<div id="ov"></div><div id="toast"></div><div id="pk"></div>
 <script>
 "use strict";
 
@@ -320,7 +322,7 @@ const fire = (e, angle, speed, dmg, life = 5) => eBullets.push({
 
 function makeEnemy(k, x, y, hp) {
   const t = ENEMY[k];
-  return { k, boss: !!t.boss, x, y, r: t.r, hp, mh: hp, s: t.s, d: t.d, c: t.c,
+  return { id: ++enemySeq, k, boss: !!t.boss, x, y, r: t.r, hp, mh: hp, s: t.s, d: t.d, c: t.c,
            cd: 2 + rng(), fl: 0, oc: 0, lb: null };
 }
 
@@ -529,6 +531,7 @@ function buyUpgrade(k) {
 }
 
 function pauseScreen() {
+  if (net && net.role !== 'solo') return;                     // no pausing in co-op
   state = 'pause';
   show(`<h2>Paused</h2>
     <p>Seed <b>${runSeed}</b></p>
@@ -676,7 +679,7 @@ function importProfile(overwrite) {
 /* ========== Run lifecycle ========== */
 /* One player's whole build + state. players[] holds every player; `player` is the local one.
    Non-local players are driven through p.input = {dx, dy} (network peer, bot, test). */
-function makePlayer(idx) {
+function makePlayer(idx, ch) {
   const u = S.up;
   const p = {
     idx, isP: true, input: { dx: 0, dy: 0 },
@@ -689,7 +692,7 @@ function makePlayer(idx) {
     pc: {}, evo: {}, area: 1, regen: 0, acd: 1, mcd: 1, scd: 1,
     cd: 0, ncd: 2, ang: 0, iv: 0
   };
-  const c = CHAR[idx === 0 ? effChar() : 0];      // character + mutator modifiers
+  const c = CHAR[idx === 0 ? effChar() : clamp(ch | 0, 0, CHAR.length - 1)];      // character + mutator modifiers
   Object.assign(p.w, c.w); c.mod(p);
   if (mutOn(0)) { p.dmg *= 2; p.mhp = Math.round(p.mhp / 2); }
   p.hp = p.mhp;
@@ -714,6 +717,7 @@ function start(sd) {
 }
 
 function gameOver() {
+  if (net && net.role !== 'solo') return coopGameOver();
   state = 'over';
   checkAch();
   const earn = Math.floor((time / 6 + kills / 8) * mutBonus());
@@ -787,6 +791,7 @@ function killEnemy(e) {
 function damage(e, d) { e.hp -= d; e.fl = 0.07; }
 
 function levelUp() {
+  if (net && net.role === 'host') return coopLevelUp();      // co-op: everyone picks, nobody pauses
   level++; xp -= xpNext; xpNext = TUNE.xpNeed(level);
   player.mhp += 3; player.hp = Math.min(player.mhp, player.hp + player.mhp * 0.1);   // small heal + HP per level
   const owned = Object.keys(player.w).filter(k => player.w[k] > 0).length;
@@ -806,19 +811,23 @@ function levelUp() {
     ).join(''));
 }
 
+function applyUpgrade(p, id) {
+  const up = UPGRADES.find(u => u.id === id);
+  if (up && up.p) p.pc[id] = (p.pc[id] || 0) + 1;
+  if (id.startsWith('evo_')) p.evo[id.slice(4)] = 1;
+  else if (id === 'area') p.area *= 1 + 0.15 * TUNE.passiveGain(p.pc.area);
+  else if (id === 'regen') p.regen += 0.4;
+  if (p.w[id] !== undefined) p.w[id]++;
+  else if (id === 'spd') p.spd *= 1 + 0.12 * TUNE.passiveGain(p.pc.spd);
+  else if (id === 'dmg') p.dmg *= 1 + 0.2 * TUNE.passiveGain(p.pc.dmg);
+  else if (id === 'rate') p.rate *= 1 + 0.15 * TUNE.passiveGain(p.pc.rate);
+  else if (id === 'hp') { p.mhp += 25; p.hp = Math.min(p.mhp, p.hp + 25); }
+  else if (id === 'mag') p.mag *= 1 + 0.4 * TUNE.passiveGain(p.pc.mag);
+}
+
 function pickUpgrade(id) {
   if (state !== 'pick') return;
-  const up = UPGRADES.find(u => u.id === id);
-  if (up && up.p) player.pc[id] = (player.pc[id] || 0) + 1;
-  if (id.startsWith('evo_')) player.evo[id.slice(4)] = 1;
-  else if (id === 'area') player.area *= 1 + 0.15 * TUNE.passiveGain(player.pc.area);
-  else if (id === 'regen') player.regen += 0.4;
-  if (player.w[id] !== undefined) player.w[id]++;
-  else if (id === 'spd') player.spd *= 1 + 0.12 * TUNE.passiveGain(player.pc.spd);
-  else if (id === 'dmg') player.dmg *= 1 + 0.2 * TUNE.passiveGain(player.pc.dmg);
-  else if (id === 'rate') player.rate *= 1 + 0.15 * TUNE.passiveGain(player.pc.rate);
-  else if (id === 'hp') { player.mhp += 25; player.hp = Math.min(player.mhp, player.hp + 25); }
-  else if (id === 'mag') player.mag *= 1 + 0.4 * TUNE.passiveGain(player.pc.mag);
+  applyUpgrade(player, id);
   hide(); state = 'play';
 }
 
@@ -1008,6 +1017,7 @@ function updateWeapons(p, dt) {
 
 function tick(dt) {
   time += dt; gcTimer += dt;
+  if (net && net.role === 'host') netTick(dt);               // co-op: pick timeouts + snapshots
   if ((time | 0) !== lastSec) { lastSec = time | 0; checkAch(); }   // achievements are checked once per second
 
   for (const p of players) {
@@ -1278,7 +1288,7 @@ function draw() {
 
   g.shadowBlur = 18; g.shadowColor = '#19e6ff';
   for (const p of players) {
-    g.fillStyle = p.iv > 0 && ((time * 20 | 0) % 2) ? '#fff' : (p === player ? '#19e6ff' : '#7dff3a');
+    g.fillStyle = p.iv > 0 && ((time * 20 | 0) % 2) ? '#fff' : (p.hp <= 0 ? '#555' : p === player ? '#19e6ff' : '#7dff3a');
     g.beginPath(); g.arc(p.x + ox, p.y + oy, p.r, 0, 6.283); g.fill();
   }
   g.shadowBlur = 0;
@@ -1688,7 +1698,10 @@ function createNet(kind) {
   const pub = () => n.lobby.map(p => ({ idx: p.idx, name: p.name, ping: p.ping }));
   const cast = () => { for (const p of n.lobby) if (p.id !== 'host') sendTo(p.id, { t: 'lobby', list: pub(), max: n.max, code: n.code }); n.onChange(); };
   const nameOf = v => String(v || 'Player').replace(/[^\w \-.]/g, '').trim().slice(0, 16) || 'Player';
-  const drop = id => { const i = n.lobby.findIndex(p => p.id === id); if (i > 0) { n.lobby.splice(i, 1); cast(); } };
+  const drop = id => {
+    const i = n.lobby.findIndex(p => p.id === id);
+    if (i > 0) { const e = n.lobby[i]; if (e.player) { e.player.hp = 0; e.player.gone = true; } n.lobby.splice(i, 1); cast(); }
+  };
 
   const hostMsg = (id, m) => {
     if (!m || typeof m !== 'object') return;
@@ -1701,7 +1714,7 @@ function createNet(kind) {
       if (idx < 0) return sendTo(id, { t: 'reject', why: 'The lobby is full.' });
       let nm = nameOf(m.name);                                   // keep names unique in the lobby
       if (n.lobby.some(q => q.name === nm)) nm = (nm.slice(0, 12) + ' ' + (idx + 1)).trim();
-      n.lobby.push({ idx, id, name: nm, ping: 0, seen: now() });
+      n.lobby.push({ idx, id, name: nm, ch: clamp(m.ch | 0, 0, CHAR.length - 1), ping: 0, seen: now() });
       sendTo(id, { t: 'welcome', idx, code: n.code }); cast();
     } else if (m.t === 'ping') { if (p) { p.ping = Math.min(999, m.rtt | 0); sendTo(id, { t: 'pong', ts: m.ts }); } }
     else if (m.t === 'leave') drop(id);
@@ -1742,7 +1755,7 @@ function createNet(kind) {
     n.tr = n.kind === 'local' ? localTransport() : peerTransport();
     if (typeof setInterval === 'function') n.timer = setInterval(() => n.tick(), 1000);
     await n.tr.join(n.code, {
-      ready: () => { n.status = 'Joining lobby…'; sendTo('host', { t: 'hello', v: NET_VER, name: nameOf(activeName()) }); n.onChange(); },
+      ready: () => { n.status = 'Joining lobby…'; sendTo('host', { t: 'hello', v: NET_VER, name: nameOf(activeName()), ch: effChar() }); n.onChange(); },
       error: e => { const w = e === 'no-room' ? 'No lobby with that code.' : 'Connection failed. Strict networks can block peer connections.'; n.leave(); n.onLost(w); },
       msg: (id, m) => clientMsg(m),
       close: () => { if (n.role === 'client') { n.leave(); n.onLost('Host disconnected.'); } }
@@ -1786,7 +1799,7 @@ function mpScreen(msg) {
 }
 function mpWire() {
   net.onChange = () => { if (net.role !== 'solo' && state === 'lobby') lobbyScreen(); };
-  net.onLost = msg => { state = 'title'; mpScreen(msg); };
+  net.onLost = msg => { state = 'title'; stopMusic(); hidePicker(); mpScreen(msg); };
   net.onStart = m => startCoop(m);
 }
 function mpHost() { net = createNet(mpLocal ? 'local' : 'peer'); mpWire(); state = 'lobby'; lobbyScreen(); net.host(mpMax); }
@@ -1807,14 +1820,179 @@ function lobbyScreen() {
 }
 function mpCopy() { const l = $('lk'); l.select(); try { navigator.clipboard.writeText(l.value); } catch {} }
 function mpStart() { if (net.role === 'host') net.start('MP' + Date.now().toString(36)); }
-function mpLeave() { net.leave(); state = 'title'; mpScreen(); }
-/* Stage M1 placeholder: every player starts their own run on the shared seed. Stage M2 replaces this with synced co-op. */
-function startCoop(m) { S.bot = 0; start(m.seed); const t = $('toast'); t.innerHTML = 'Lobby works. Live co-op sync arrives in the next stage; this run is independent.'; t.style.display = 'block'; if (typeof setTimeout === 'function') setTimeout(() => { t.style.display = 'none'; }, 4000); }
+function mpLeave() { net.leave(); state = 'title'; stopMusic(); hidePicker(); mpScreen(); }
+/* ========== Multiplayer, stage M2: gameplay sync ==========
+   The host simulates everything. Clients send inputs (20 Hz) and level-up choices; the host sends 15 Hz snapshots
+   of everything near each client. Clients draw ~100 ms in the past (interpolated) and predict their own movement. */
+let enemySeq = 0, snapSeq = 0, snapTimer = 0, snaps = [], inTimer = 0, lastIn = '', inRep = 0, pkShown = false;
+const cp = new Map();                                  // client: idx -> player object
+function startCoop(m) { if (net.role === 'host') coopStartHost(m); else coopStartClient(m); }
+function localInput() {
+  let ix = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+  let iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+  if (joy) { ix += joy.dx; iy += joy.dy; }
+  return limit(ix, iy);
+}
+
+/* ----- host ----- */
+function coopStartHost(m) {
+  S.bot = 0; start(m.seed);                              // players[0] = the host
+  player.netId = 'host'; player.name = net.lobby[0].name; net.lobby[0].player = player;
+  for (const e of net.lobby.slice(1)) {
+    const p = makePlayer(e.idx, e.ch); p.x = 40 * e.idx; p.netId = e.id; p.name = e.name; e.player = p; players.push(p);
+  }
+  net.onMsg = hostGame; snapSeq = 0; snapTimer = 0; hidePicker();
+}
+function hostGame(e, m) {
+  const p = e.player; if (!p) return;
+  if (m.t === 'in') p.input = { dx: clamp(+m.dx || 0, -1, 1), dy: clamp(+m.dy || 0, -1, 1) };
+  else if (m.t === 'pickd' && p.pick && Number.isInteger(m.i) && m.i >= 0 && m.i < p.pick.choices.length) resolvePick(p, m.i);
+}
+function netTick() {
+  for (const p of players) if (p.pick && time > p.pick.until) resolvePick(p, 0);       // auto-pick on timeout
+  if (++snapTimer < 4) return;
+  snapTimer = 0; broadcastSnap();
+}
+function broadcastSnap() {
+  const ps = players.map(p => [p.idx, p.x | 0, p.y | 0, Math.max(0, p.hp) | 0, p.mhp | 0, p.iv > 0 ? 1 : 0, (p.ang * 100) | 0, p.w.orb | 0, p.evo.orb ? 1 : 0, (p.area * 100) | 0]);
+  const head = { t: 's', n: ++snapSeq, tm: +time.toFixed(2), kl: kills, xp: Math.floor(xp), xn: xpNext, lv: level, bc: bossCount, ps };
+  for (const e of net.lobby) {
+    const p = e.player; if (!p || e.id === 'host') continue;
+    const near = (x, y) => Math.abs(x - p.x) < 1300 && Math.abs(y - p.y) < 900;
+    const m = Object.assign({}, head, {
+      me: { w: p.w, evo: p.evo, spd: p.spd, area: p.area, dmg: +p.dmg.toFixed(2), rate: +p.rate.toFixed(2) },
+      es: [], bs: [], eb: [], gm: [], pk: [], mn: [], ar: [], rg: []
+    });
+    for (const q of enemies) if (near(q.x, q.y)) m.es.push([q.id, q.k, q.x | 0, q.y | 0, (q.fl > 0 ? 1 : 0) | (q.elite ? 2 : 0) | (q.boss ? 4 : 0), (q.cd * 10) | 0, q.boss ? Math.round(1000 * q.hp / q.mh) : 0]);
+    for (const q of bullets) if (m.bs.length < 500 && near(q.x, q.y)) m.bs.push([q.x | 0, q.y | 0]);
+    for (const q of eBullets) if (m.eb.length < 500 && near(q.x, q.y)) m.eb.push([q.x | 0, q.y | 0]);
+    for (const q of gems) if (m.gm.length < 400 && near(q.x, q.y)) m.gm.push([q.x | 0, q.y | 0, q.v]);
+    for (const q of packs) if (near(q.x, q.y)) m.pk.push([q.x | 0, q.y | 0, (q.life * 10) | 0]);
+    for (const q of mines) if (near(q.x, q.y)) m.mn.push([q.x | 0, q.y | 0, q.t <= 0 ? 1 : 0]);
+    for (const q of arcs) m.ar.push([q.x1 | 0, q.y1 | 0, q.x2 | 0, q.y2 | 0, (q.l * 100) | 0]);
+    for (const q of rings) m.rg.push([q.x | 0, q.y | 0, q.r | 0, q.m | 0]);
+    net.tr.send(e.id, m);
+  }
+}
+/* ----- co-op level-up: every player gets their own non-blocking pick (15 s, then the first option) ----- */
+function rollChoices(p) {                                // same rules as the solo level-up screen
+  const owned = Object.keys(p.w).filter(k => p.w[k] > 0).length;
+  const pool = UPGRADES.filter(u => u.p || (p.w[u.id] < 6 && (p.w[u.id] > 0 || owned < MAX_WEAPONS)));
+  const evos = Object.keys(EVO).filter(k => p.w[k] >= 6 && !p.evo[k] && (p.pc[EVO[k].p] || 0) >= 2).map(k => ({ ...EVO[k], evo: 1 }));
+  const picks = evos.slice(0, 1);
+  while (picks.length < 3 && pool.length) picks.push(pool.splice(rng() * pool.length | 0, 1)[0]);
+  return picks.map(u => ({ id: u.id, n: u.n, d: u.d, evo: u.evo ? 1 : 0, p: u.p ? 1 : 0, lv: p.w[u.id] || 0 }));
+}
+function coopLevelUp() {
+  level++; xp -= xpNext; xpNext = TUNE.xpNeed(level);
+  for (const p of players) { if (p.hp <= 0) continue; p.mhp += 3; p.hp = Math.min(p.mhp, p.hp + p.mhp * 0.1); offerPick(p); }
+  playTone(880, 0.2, 'sine', 0.06);
+}
+function offerPick(p) {
+  if (p.pick) { p.pend = (p.pend || 0) + 1; return; }
+  p.pick = { choices: rollChoices(p), until: time + 15 };
+  if (p === player) showPicker(p.pick.choices); else net.tr.send(p.netId, { t: 'pick', choices: p.pick.choices });
+}
+function resolvePick(p, i) {
+  const c = p.pick.choices[i]; p.pick = null;
+  applyUpgrade(p, c.id);
+  if (p === player) hidePicker(); else net.tr.send(p.netId, { t: 'pickend', id: c.id });
+  if (p.pend) { p.pend--; offerPick(p); }
+}
+function showPicker(choices) {
+  pkShown = true; const el = $('pk'); el.style.display = 'block';
+  el.innerHTML = '<b>Level up!</b> <small>press 1-3 (auto-picks in 15 s)</small><div>' + choices.map((c, i) =>
+    `<button onclick="pickChoice(${i})">${i + 1}. ${esc(c.n)}${c.evo ? ' ★ EVOLUTION' : c.p ? '' : c.lv ? ' → Lv' + (c.lv + 1) : ' (NEW)'}<br><small>${esc(c.d)}</small></button>`).join('') + '</div>';
+}
+function hidePicker() { pkShown = false; const el = $('pk'); if (el) el.style.display = 'none'; }
+function pickChoice(i) {
+  if (!pkShown) return;
+  if (net.role === 'host') { if (player.pick) resolvePick(player, i); }
+  else { net.tr.send('host', { t: 'pickd', i }); hidePicker(); }
+}
+addEventListener('keydown', e => { if (pkShown && e.key >= '1' && e.key <= '3') pickChoice(+e.key - 1); });
+
+/* ----- client ----- */
+function coopStartClient(m) {
+  S.bot = 0; seed = cleanSeed(m.seed); runSeed = seed; chunks = new Map(); runMut = 0;
+  enemies = []; bullets = []; eBullets = []; gems = []; packs = []; rings = []; arcs = []; mines = [];
+  time = 0; kills = 0; level = 1; xp = 0; xpNext = TUNE.xpNeed(1); bossCount = 0; cam = { x: 0, y: 0 };
+  cp.clear(); player = makePlayer(net.idx); cp.set(net.idx, player); players = [player];
+  snaps = []; inTimer = 0; lastIn = ''; net.onMsg = (e, msg) => clientGame(msg);
+  hidePicker(); hide(); state = 'play'; startMusic();
+}
+function clientGame(m) {
+  if (m.t === 's') { m.at = performance.now(); snaps.push(m); if (snaps.length > 6) snaps.shift(); }
+  else if (m.t === 'pick') showPicker(m.choices);
+  else if (m.t === 'pickend') hidePicker();
+  else if (m.t === 'over') coopOver(m);
+  else if (m.t === 'tolobby') { state = 'lobby'; stopMusic(); hidePicker(); lobbyScreen(); }
+}
+function clientFrame(d) {
+  const rt = performance.now() - 100;                    // render slightly in the past so there is always a snapshot to blend to
+  let a = null, b = null;
+  for (let i = snaps.length - 1; i >= 0; i--) if (snaps[i].at <= rt) { a = snaps[i]; b = snaps[i + 1] || null; break; }
+  if (!a) a = snaps[0];
+  if (!a) { draw(); return; }
+  const k = b ? clamp((rt - a.at) / (b.at - a.at), 0, 1) : 0, s = b || a, latest = snaps[snaps.length - 1];
+  time = s.tm; kills = s.kl; xp = s.xp; xpNext = s.xn; level = s.lv; bossCount = s.bc;
+  const old = new Map(a.ps.map(r => [r[0], r]));
+  players = s.ps.map(r => {
+    let p = cp.get(r[0]); if (!p) { p = makePlayer(r[0]); cp.set(r[0], p); }
+    const o = old.get(r[0]) || r, mine = r[0] === net.idx;
+    p.hp = r[3]; p.mhp = r[4]; p.iv = r[5] ? 0.1 : 0; p.ang = r[6] / 100;
+    if (mine) {
+      const me = latest.me, spd = me.spd || 170, [nx, ny] = limit(...localInput());   // prediction: move now, reconcile gently
+      if (p.hp > 0) { p.x += nx * spd * d; p.y += ny * spd * d; pushOut(p); }
+      const lr = latest.ps.find(q => q[0] === r[0]) || r, ex = lr[1] - p.x, ey = lr[2] - p.y;
+      if (Math.hypot(ex, ey) > 90) { p.x = lr[1]; p.y = lr[2]; } else { p.x += ex * 0.08; p.y += ey * 0.08; }
+      p.w = me.w; p.evo = me.evo; p.area = me.area; p.spd = spd; p.dmg = me.dmg; p.rate = me.rate;
+    } else {
+      p.x = o[1] + (r[1] - o[1]) * k; p.y = o[2] + (r[2] - o[2]) * k;
+      p.w = { orb: r[7] }; p.evo = { orb: r[8] }; p.area = r[9] / 100;
+    }
+    return p;
+  });
+  player = cp.get(net.idx);
+  const em = new Map(a.es.map(r => [r[0], r]));
+  enemies = s.es.map(r => {
+    const o = em.get(r[0]) || r, t = ENEMY[r[1]], el = (r[4] & 2) !== 0, bs = (r[4] & 4) !== 0;
+    return { id: r[0], k: r[1], x: o[2] + (r[2] - o[2]) * k, y: o[3] + (r[3] - o[3]) * k, r: t.r * (el ? 1.25 : 1), c: t.c,
+             fl: r[4] & 1 ? 0.05 : 0, elite: el, boss: bs, cd: r[5] / 10, hp: bs ? r[6] : 1, mh: bs ? 1000 : 1 };
+  });
+  bullets = s.bs.map(r => ({ x: r[0], y: r[1] })); eBullets = s.eb.map(r => ({ x: r[0], y: r[1] }));
+  gems = s.gm.map(r => ({ x: r[0], y: r[1], v: r[2] })); packs = s.pk.map(r => ({ x: r[0], y: r[1], life: r[2] / 10 }));
+  mines = s.mn.map(r => ({ x: r[0], y: r[1], t: r[2] ? 0 : 1 })); arcs = s.ar.map(r => ({ x1: r[0], y1: r[1], x2: r[2], y2: r[3], l: r[4] / 100 }));
+  rings = s.rg.map(r => ({ x: r[0], y: r[1], r: r[2], m: r[3] }));
+  cam.x += (player.x - cam.x) * 0.12; cam.y += (player.y - cam.y) * 0.12;
+  inTimer += d;
+  if (inTimer >= 0.05) {                                  // 20 Hz input, repeated now and then so a lost packet heals
+    inTimer = 0; const [ix, iy] = localInput(), key = ix.toFixed(2) + ',' + iy.toFixed(2);
+    if (key !== lastIn || ++inRep > 5) { lastIn = key; inRep = 0; net.tr.send('host', { t: 'in', dx: +ix.toFixed(2), dy: +iy.toFixed(2) }); }
+  }
+  draw();
+}
+/* ----- end of run ----- */
+function coopGameOver() {
+  state = 'over'; hidePicker(); checkAch();
+  const m = { t: 'over', time: Math.floor(time), kills, level, bc: bossCount };
+  for (const e of net.lobby) if (e.id !== 'host') net.tr.send(e.id, m);
+  coopOver(m);
+}
+function coopOver(m) {
+  state = 'over'; hidePicker(); stopMusic();
+  const earn = Math.floor((m.time / 6 + m.kills / 8) * (net.role === 'host' ? mutBonus() : 1));
+  S.shards += earn; S.runs++; S.kills += m.kills; S.best = Math.max(S.best, m.time); save();
+  show(`<h2>Run over</h2><p>${m.time}s · ${m.kills} kills · level ${m.level}</p><p class=b>+${earn}◆ shards</p>` +
+    (net.role === 'host' ? '<button onclick="mpBack()">Back to lobby</button>' : '<p>Waiting for the host…</p>') + '<button onclick="mpLeave()">Leave</button>');
+}
+function mpBack() { for (const e of net.lobby) if (e.id !== 'host') net.tr.send(e.id, { t: 'tolobby' }); state = 'lobby'; lobbyScreen(); }
 
 function frame(t) {
   requestAnimationFrame(frame);
   const d = Math.min((t - last) / 1000, 0.1);
   last = t;
+  if (net && net.role === 'client' && state === 'play') { clientFrame(d); return; }   // clients only render
   if (state === 'play') {
     acc += d;
     while (acc >= 1 / 60 && state === 'play') { tick(1 / 60); acc -= 1 / 60; }
