@@ -763,7 +763,7 @@ function spawnEnemy(isBoss) {
   const R = Math.hypot(W, H) / 2 + 60;
   const k = isBoss ? ENEMY.findIndex(t => t.boss) : pickType();   // regular spawns can never be a boss
   const t = ENEMY[k];
-  const hp = isBoss ? t.hp * TUNE.bossHp(bossCount) : t.hp * TUNE.hpMult(time) * (mutOn(5) ? 1.5 : 1);
+  const hp = isBoss ? t.hp * TUNE.bossHp(bossCount) * crowd(0.5) : t.hp * TUNE.hpMult(time) * (mutOn(5) ? 1.5 : 1) * crowd(0.25);
   const sp = players.length > 1 ? players[(rng() * players.length) | 0] : player;   // spawn around a random player
   const e = makeEnemy(k, sp.x + Math.cos(a) * R, sp.y + Math.sin(a) * R, hp);
   if (!isBoss) {
@@ -865,7 +865,7 @@ function nearEnemies(x, y, r) {
 function nearestPlayer(x, y) {
   let best = null, bd = Infinity;
   for (const p of players) {
-    if (p.hp <= 0) continue;
+    if (p.hp <= 0 || p.afk) continue;
     const d = dist2(p.x, p.y, x, y);
     if (d < bd) { bd = d; best = p; }
   }
@@ -1027,12 +1027,12 @@ function tick(dt) {
       iy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
       if (joy) { ix += joy.dx; iy += joy.dy; }
     } else { ix = p.input.dx; iy = p.input.dy; }   // remote / scripted players
-    const [nx, ny] = limit(ix, iy);
+    const [nx, ny] = p.hp > 0 ? limit(ix, iy) : [0, 0];
     p.x += nx * p.spd * dt;
     p.y += ny * p.spd * dt;
     pushOut(p);
     p.iv -= dt;
-    p.hp = Math.min(p.mhp, p.hp + (mutOn(4) ? 0 : p.regen) * dt);
+    if (p.hp > 0) p.hp = Math.min(p.mhp, p.hp + (mutOn(4) ? 0 : p.regen) * dt);   // a downed player does not regenerate back up
   }
   cam.x += (player.x - cam.x) * 0.12;
   cam.y += (player.y - cam.y) * 0.12;
@@ -1047,17 +1047,17 @@ function tick(dt) {
     }
   }
 
-  spawnAcc += dt * TUNE.spawnRate(time) * (mutOn(1) ? 1.5 : 1);
+  spawnAcc += dt * TUNE.spawnRate(time) * (mutOn(1) ? 1.5 : 1) * crowd(0.6);
   while (spawnAcc >= 1) {
     spawnAcc--;
-    if (enemies.length < TUNE.enemyCap(time)) spawnEnemy(false);
+    if (enemies.length < TUNE.enemyCap(time) + 80 * (crowd(1) - 1)) spawnEnemy(false);
   }
   if (time >= TUNE.bossAt(bossCount) && !enemies.some(e => e.boss)) spawnEnemy(true);
 
   buildGrid();
 
   // Player weapons (each player fires independently)
-  for (const p of players) fireBolt(p, dt);
+  for (const p of players) if (p.hp > 0) fireBolt(p, dt);
 
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
@@ -1075,7 +1075,7 @@ function tick(dt) {
     if (remove) { bullets[i] = bullets[bullets.length - 1]; bullets.pop(); }
   }
 
-  for (const p of players) updateWeapons(p, dt);
+  for (const p of players) if (p.hp > 0) updateWeapons(p, dt);
   for (let i = arcs.length - 1; i >= 0; i--) if ((arcs[i].l -= dt) <= 0) arcs.splice(i, 1);
 
   // Enemies
@@ -1290,6 +1290,11 @@ function draw() {
   for (const p of players) {
     g.fillStyle = p.iv > 0 && ((time * 20 | 0) % 2) ? '#fff' : (p.hp <= 0 ? '#555' : p === player ? '#19e6ff' : '#7dff3a');
     g.beginPath(); g.arc(p.x + ox, p.y + oy, p.r, 0, 6.283); g.fill();
+    if (p.hp <= 0 && !p.gone && p.bleed !== undefined) {         // downed: revive progress ring + time left
+      g.save(); g.strokeStyle = '#4dff88'; g.lineWidth = 3; g.shadowBlur = 0;
+      g.beginPath(); g.arc(p.x + ox, p.y + oy, p.r + 6, -1.57, -1.57 + 6.283 * Math.min(1, (p.rv || 0) / 3)); g.stroke();
+      g.fillStyle = '#fff'; g.font = '12px system-ui'; g.fillText(Math.ceil(p.bleed) + 's', p.x + ox - 8, p.y + oy - p.r - 10); g.restore();
+    }
   }
   g.shadowBlur = 0;
 
@@ -1691,17 +1696,24 @@ function localTransport() {
 
 function createNet(kind) {
   const n = { kind, role: 'solo', code: '', max: 4, idx: 0, lobby: [], status: '', tr: null, rtt: 0, last: 0, timer: 0,
-              onChange() {}, onStart() {}, onLost() {}, onMsg() {} };
+              running: false, inGame: false, tries: 0, tok: '',
+              onChange() {}, onStart() {}, onLost() {}, onMsg() {}, onLate() {}, onRejoin() {}, onAway() {} };
   const now = () => performance.now();
   const sendTo = (id, m) => { if (n.tr) n.tr.send(id, m); };
   const free = () => { for (let i = 1; i < n.max; i++) if (!n.lobby.some(p => p.idx === i)) return i; return -1; };
   const pub = () => n.lobby.map(p => ({ idx: p.idx, name: p.name, ping: p.ping }));
   const cast = () => { for (const p of n.lobby) if (p.id !== 'host') sendTo(p.id, { t: 'lobby', list: pub(), max: n.max, code: n.code }); n.onChange(); };
   const nameOf = v => String(v || 'Player').replace(/[^\w \-.]/g, '').trim().slice(0, 16) || 'Player';
-  const drop = id => {
-    const i = n.lobby.findIndex(p => p.id === id);
-    if (i > 0) { const e = n.lobby[i]; if (e.player) { e.player.hp = 0; e.player.gone = true; } n.lobby.splice(i, 1); cast(); }
+  const removeEntry = e => {                                       // a player leaves for good
+    const i = n.lobby.indexOf(e); if (i < 1) return;
+    if (e.player) { e.player.hp = 0; e.player.gone = true; const k = players.indexOf(e.player); if (k > 0) players.splice(k, 1); }
+    n.lobby.splice(i, 1); cast();
   };
+  const drop = id => {                                           // connection lost: mid-run players keep their slot for 60 s
+    const e = n.lobby.find(p => p.id === id); if (!e || e === n.lobby[0]) return;
+    if (n.running && e.player) { e.away = now(); e.player.afk = true; n.onAway(e); cast(); } else removeEntry(e);
+  };
+  n._remove = removeEntry;
 
   const hostMsg = (id, m) => {
     if (!m || typeof m !== 'object') return;
@@ -1710,14 +1722,22 @@ function createNet(kind) {
     if (m.t === 'hello') {
       if (p) return;
       if (m.v !== NET_VER) return sendTo(id, { t: 'reject', why: 'Version mismatch: refresh the page.' });
+      const tok = String(m.tok || '').slice(0, 24), old = tok && n.lobby.find(q => q.tok === tok && q.away);
+      if (old) {                                                 // a player who dropped mid-run is back: give the slot back
+        old.id = id; old.away = 0; old.seen = now();
+        if (old.player) { old.player.netId = id; old.player.afk = false; }
+        sendTo(id, { t: 'welcome', idx: old.idx, code: n.code }); cast(); n.onRejoin(old); return;
+      }
       const idx = free();
       if (idx < 0) return sendTo(id, { t: 'reject', why: 'The lobby is full.' });
       let nm = nameOf(m.name);                                   // keep names unique in the lobby
       if (n.lobby.some(q => q.name === nm)) nm = (nm.slice(0, 12) + ' ' + (idx + 1)).trim();
-      n.lobby.push({ idx, id, name: nm, ch: clamp(m.ch | 0, 0, CHAR.length - 1), ping: 0, seen: now() });
+      const ent = { idx, id, tok, name: nm, ch: clamp(m.ch | 0, 0, CHAR.length - 1), ping: 0, seen: now() };
+      n.lobby.push(ent);
       sendTo(id, { t: 'welcome', idx, code: n.code }); cast();
+      if (n.running) n.onLate(ent);                               // joined while a run is in progress
     } else if (m.t === 'ping') { if (p) { p.ping = Math.min(999, m.rtt | 0); sendTo(id, { t: 'pong', ts: m.ts }); } }
-    else if (m.t === 'leave') drop(id);
+    else if (m.t === 'leave') { const e = n.lobby.find(q => q.id === id); if (e) removeEntry(e); }   // an explicit leave frees the slot at once
     else if (p) n.onMsg(p, m);                    // gameplay messages (later stages)
   };
   const clientMsg = m => {
@@ -1729,7 +1749,7 @@ function createNet(kind) {
     else if (m.t === 'kick') { n.leave(); n.onLost('You were removed by the host.'); }
     else if (m.t === 'closed') { n.leave(); n.onLost('The host closed the lobby.'); }
     else if (m.t === 'pong') n.rtt = Math.round(now() - m.ts);
-    else if (m.t === 'start') n.onStart(m);
+    else if (m.t === 'start') { n.inGame = true; n.tries = 0; n.onStart(m); }
     else n.onMsg(null, m);
   };
 
@@ -1737,7 +1757,7 @@ function createNet(kind) {
   n.leave = () => {
     if (n.tr) { try { if (n.role === 'host') n.lobby.forEach(p => p.id !== 'host' && sendTo(p.id, { t: 'closed' })); if (n.role === 'client') sendTo('host', { t: 'leave' }); n.tr.close(); } catch {} }
     if (n.timer) clearInterval(n.timer);
-    n.timer = 0; n.tr = null; n.role = 'solo'; n.lobby = []; n.idx = 0;
+    n.timer = 0; n.tr = null; n.role = 'solo'; n.lobby = []; n.idx = 0; n.running = false; n.inGame = false;
   };
   n.host = async (max, tries = 0) => {
     n.leave(); n.role = 'host'; n.max = clamp(max | 0, 2, MP_MAX); n.code = roomCode(); n.idx = 0; n.status = 'Opening lobby…';
@@ -1750,25 +1770,46 @@ function createNet(kind) {
       open: () => {}, msg: hostMsg, close: drop
     });
   };
-  n.join = async code => {
-    n.leave(); n.role = 'client'; n.code = cleanRoom(code); n.status = 'Connecting…'; n.last = now();
-    n.tr = n.kind === 'local' ? localTransport() : peerTransport();
-    if (typeof setInterval === 'function') n.timer = setInterval(() => n.tick(), 1000);
-    await n.tr.join(n.code, {
-      ready: () => { n.status = 'Joining lobby…'; sendTo('host', { t: 'hello', v: NET_VER, name: nameOf(activeName()), ch: effChar() }); n.onChange(); },
-      error: e => { const w = e === 'no-room' ? 'No lobby with that code.' : 'Connection failed. Strict networks can block peer connections.'; n.leave(); n.onLost(w); },
-      msg: (id, m) => clientMsg(m),
-      close: () => { if (n.role === 'client') { n.leave(); n.onLost('Host disconnected.'); } }
-    });
+  const cliHandlers = tr => ({                                    // handlers are bound to one transport so stale ones are ignored
+    ready: () => { if (n.tr !== tr) return; n.status = n.inGame ? 'Rejoining…' : 'Joining lobby…'; sendTo('host', { t: 'hello', v: NET_VER, name: nameOf(activeName()), ch: effChar(), tok: n.tok }); n.onChange(); },
+    error: e => {
+      if (n.tr !== tr) return;
+      if (n.inGame && n.role === 'client') return n.retry();
+      const w = e === 'no-room' ? 'No lobby with that code.' : 'Connection failed. Strict networks can block peer connections.'; n.leave(); n.onLost(w);
+    },
+    msg: (id, m) => { if (n.tr === tr) clientMsg(m); },
+    close: () => { if (n.tr !== tr || n.role !== 'client') return; if (n.inGame) n.retry(); else { n.leave(); n.onLost('Host disconnected.'); } }
+  });
+  n.retry = () => {                                               // mid-run connection loss: try to get back in
+    n.status = 'Connection lost. Reconnecting…'; n.onChange();
+    if (typeof setTimeout === 'function') setTimeout(() => n.reconnect(), 2000);
   };
-  n.kick = idx => { const p = n.lobby.find(q => q.idx === idx && q.id !== 'host'); if (p) { sendTo(p.id, { t: 'kick' }); n.tr.kick(p.id); drop(p.id); } };
-  n.start = seed => { const m = { t: 'start', seed, players: pub() }; n.lobby.forEach(p => p.id !== 'host' && sendTo(p.id, m)); n.onStart(m); };
+  n.reconnect = async () => {
+    if (n.role !== 'client' || !n.inGame) return;
+    if (++n.tries > 10) { n.leave(); n.onLost('Could not reconnect to the host.'); return; }
+    const old = n.tr, tr = n.kind === 'local' ? localTransport() : peerTransport();
+    n.tr = tr; n.last = now();
+    try { old.close(); } catch {}
+    await tr.join(n.code, cliHandlers(tr));
+  };
+  n.join = async code => {
+    n.leave(); n.role = 'client'; n.code = cleanRoom(code); n.status = 'Connecting…'; n.last = now(); n.tries = 0;
+    n.tok = n.tok || Math.random().toString(36).slice(2, 12);
+    const tr = n.kind === 'local' ? localTransport() : peerTransport(); n.tr = tr;
+    if (typeof setInterval === 'function') n.timer = setInterval(() => n.tick(), 1000);
+    await tr.join(n.code, cliHandlers(tr));
+  };
+  n.kick = idx => { const p = n.lobby.find(q => q.idx === idx && q.id !== 'host'); if (p) { sendTo(p.id, { t: 'kick' }); n.tr.kick(p.id); removeEntry(p); } };
+  n.start = seed => { const m = { t: 'start', seed, players: pub() }; n.running = true; n.lobby.forEach(p => p.id !== 'host' && sendTo(p.id, m)); n.onStart(m); };
   n.tick = () => {                                 // 1 Hz: ping, timeouts
     if (n.role === 'client') {
       sendTo('host', { t: 'ping', ts: now(), rtt: n.rtt });
       if (now() - n.last > 10000) { n.leave(); n.onLost('Lost connection to the host.'); }
     } else if (n.role === 'host') {
-      for (const p of n.lobby.slice(1)) if (now() - p.seen > 10000) n.kick(p.idx);
+      for (const p of n.lobby.slice(1)) {
+        if (p.away) { if (now() - p.away > 60000) { n.onAway(p, true); removeEntry(p); } }
+        else if (now() - p.seen > 10000) drop(p.id);
+      }
       cast();
     }
   };
@@ -1842,19 +1883,22 @@ function coopStartHost(m) {
     const p = makePlayer(e.idx, e.ch); p.x = 40 * e.idx; p.netId = e.id; p.name = e.name; e.player = p; players.push(p);
   }
   net.onMsg = hostGame; snapSeq = 0; snapTimer = 0; hidePicker();
+  net.onLate = coopLate; net.onRejoin = coopRejoin;
+  net.onAway = (e, gone) => netToast(e.name + (gone ? ' left the game' : ' disconnected (60 s to rejoin)'));
 }
 function hostGame(e, m) {
   const p = e.player; if (!p) return;
   if (m.t === 'in') p.input = { dx: clamp(+m.dx || 0, -1, 1), dy: clamp(+m.dy || 0, -1, 1) };
   else if (m.t === 'pickd' && p.pick && Number.isInteger(m.i) && m.i >= 0 && m.i < p.pick.choices.length) resolvePick(p, m.i);
 }
-function netTick() {
+function netTick(dt) {
+  reviveTick(dt);
   for (const p of players) if (p.pick && time > p.pick.until) resolvePick(p, 0);       // auto-pick on timeout
   if (++snapTimer < 4) return;
   snapTimer = 0; broadcastSnap();
 }
 function broadcastSnap() {
-  const ps = players.map(p => [p.idx, p.x | 0, p.y | 0, Math.max(0, p.hp) | 0, p.mhp | 0, p.iv > 0 ? 1 : 0, (p.ang * 100) | 0, p.w.orb | 0, p.evo.orb ? 1 : 0, (p.area * 100) | 0]);
+  const ps = players.map(p => [p.idx, p.x | 0, p.y | 0, Math.max(0, p.hp) | 0, p.mhp | 0, p.iv > 0 ? 1 : 0, (p.ang * 100) | 0, p.w.orb | 0, p.evo.orb ? 1 : 0, (p.area * 100) | 0, p.hp > 0 ? 0 : Math.max(0, p.bleed ?? 45) | 0, ((p.rv || 0) * 100) | 0]);
   const head = { t: 's', n: ++snapSeq, tm: +time.toFixed(2), kl: kills, xp: Math.floor(xp), xn: xpNext, lv: level, bc: bossCount, ps };
   for (const e of net.lobby) {
     const p = e.player; if (!p || e.id === 'host') continue;
@@ -1885,7 +1929,7 @@ function rollChoices(p) {                                // same rules as the so
 }
 function coopLevelUp() {
   level++; xp -= xpNext; xpNext = TUNE.xpNeed(level);
-  for (const p of players) { if (p.hp <= 0) continue; p.mhp += 3; p.hp = Math.min(p.mhp, p.hp + p.mhp * 0.1); offerPick(p); }
+  for (const p of players) { if (p.hp <= 0) { p.missed = (p.missed || 0) + 1; continue; } p.mhp += 3; p.hp = Math.min(p.mhp, p.hp + p.mhp * 0.1); offerPick(p); }
   playTone(880, 0.2, 'sine', 0.06);
 }
 function offerPick(p) {
@@ -1926,7 +1970,7 @@ function clientGame(m) {
   else if (m.t === 'pick') showPicker(m.choices);
   else if (m.t === 'pickend') hidePicker();
   else if (m.t === 'over') coopOver(m);
-  else if (m.t === 'tolobby') { state = 'lobby'; stopMusic(); hidePicker(); lobbyScreen(); }
+  else if (m.t === 'tolobby') { net.inGame = false; state = 'lobby'; stopMusic(); hidePicker(); lobbyScreen(); }
 }
 function clientFrame(d) {
   const rt = performance.now() - 100;                    // render slightly in the past so there is always a snapshot to blend to
@@ -1941,6 +1985,7 @@ function clientFrame(d) {
     let p = cp.get(r[0]); if (!p) { p = makePlayer(r[0]); cp.set(r[0], p); }
     const o = old.get(r[0]) || r, mine = r[0] === net.idx;
     p.hp = r[3]; p.mhp = r[4]; p.iv = r[5] ? 0.1 : 0; p.ang = r[6] / 100;
+    p.bleed = r[3] > 0 ? undefined : r[10]; p.rv = (r[11] || 0) / 100;
     if (mine) {
       const me = latest.me, spd = me.spd || 170, [nx, ny] = limit(...localInput());   // prediction: move now, reconcile gently
       if (p.hp > 0) { p.x += nx * spd * d; p.y += ny * spd * d; pushOut(p); }
@@ -1972,6 +2017,43 @@ function clientFrame(d) {
   }
   draw();
 }
+/* ========== Multiplayer, stage M3: co-op rules ========== */
+function crowd(k) { let n = 0; for (const p of players) if (!p.gone && !p.dead) n++; return 1 + k * (Math.max(1, n) - 1); }   // scaling with player count; exactly 1 solo
+function netToast(text) {
+  const t = $('toast'); t.innerHTML = esc(text); t.style.display = 'block';
+  if (typeof setTimeout === 'function') setTimeout(() => { t.style.display = 'none'; }, 3000);
+}
+/* A downed player (HP 0) can be revived by a teammate standing next to them for 3 s; after 45 s they are out for the run. */
+function reviveTick(dt) {
+  for (const p of players) {
+    if (p.afk) p.iv = Math.max(p.iv, 0.5);                       // a disconnected player cannot be hurt while away
+    if (p.hp > 0 || p.gone || p.dead) continue;
+    p.bleed = (p.bleed === undefined ? 45 : p.bleed) - dt;
+    if (p.bleed <= 0) { p.dead = true; p.bleed = 0; continue; }
+    let helper = false;
+    for (const q of players) if (q !== p && q.hp > 0 && !q.afk && dist2(q.x, q.y, p.x, p.y) < 3600) { helper = true; break; }
+    p.rv = helper ? (p.rv || 0) + dt : Math.max(0, (p.rv || 0) - dt);
+    if (p.rv >= 3) {
+      p.hp = p.mhp * 0.5; p.iv = 2; p.rv = 0; p.bleed = undefined;
+      for (let i = Math.min(p.missed || 0, 3); i > 0; i--) offerPick(p);        // level-ups missed while down
+      p.missed = 0; netToast((p.name || 'A player') + ' was revived');
+    }
+  }
+}
+function coopLate(e) {                                            // someone joins a run that is already going
+  const p = makePlayer(e.idx, e.ch), ref = players.find(q => q.hp > 0 && !q.afk) || player;
+  p.x = ref.x + 60; p.y = ref.y; p.netId = e.id; p.name = e.name; p.mhp += 3 * (level - 1); p.hp = p.mhp; e.player = p; players.push(p);
+  net.tr.send(e.id, { t: 'start', seed: runSeed, late: 1 });
+  for (let i = Math.min(3, Math.floor(level / 3)); i > 0; i--) offerPick(p);   // catch-up picks
+  netToast(e.name + ' joined');
+}
+function coopRejoin(e) {                                          // a dropped player is back: resend the run, restore any open pick
+  const p = e.player; if (!p) return;
+  net.tr.send(e.id, { t: 'start', seed: runSeed, late: 1 });
+  if (p.pick) net.tr.send(e.id, { t: 'pick', choices: p.pick.choices });
+  netToast(e.name + ' reconnected');
+}
+
 /* ----- end of run ----- */
 function coopGameOver() {
   state = 'over'; hidePicker(); checkAch();
@@ -1980,13 +2062,18 @@ function coopGameOver() {
   coopOver(m);
 }
 function coopOver(m) {
-  state = 'over'; hidePicker(); stopMusic();
+  state = 'over'; hidePicker(); stopMusic(); net.inGame = false;
   const earn = Math.floor((m.time / 6 + m.kills / 8) * (net.role === 'host' ? mutBonus() : 1));
   S.shards += earn; S.runs++; S.kills += m.kills; S.best = Math.max(S.best, m.time); save();
   show(`<h2>Run over</h2><p>${m.time}s · ${m.kills} kills · level ${m.level}</p><p class=b>+${earn}◆ shards</p>` +
     (net.role === 'host' ? '<button onclick="mpBack()">Back to lobby</button>' : '<p>Waiting for the host…</p>') + '<button onclick="mpLeave()">Leave</button>');
 }
-function mpBack() { for (const e of net.lobby) if (e.id !== 'host') net.tr.send(e.id, { t: 'tolobby' }); state = 'lobby'; lobbyScreen(); }
+function mpBack() {
+  net.running = false;
+  for (const e of net.lobby.slice(1)) if (e.away) net._remove(e);
+  for (const e of net.lobby) if (e.id !== 'host') net.tr.send(e.id, { t: 'tolobby' });
+  state = 'lobby'; lobbyScreen();
+}
 
 function frame(t) {
   requestAnimationFrame(frame);
