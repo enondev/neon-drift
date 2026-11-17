@@ -1664,9 +1664,9 @@ function peerTransport() {
       });
     },
     send(to, m) {
-      const dc = c.dataChannel || c._dc;
+      const c = conns.get(to);
       if (!c || !c.open) return;
-      if (m.t === 's' && dc && dc.bufferedAmount > 65536) return; // peer is behind: drop this snapshot instead of adding latency
+      if (m.t === 's' && c.dataChannel && c.dataChannel.bufferedAmount > 65536) return;   // peer is behind: drop this snapshot instead of adding latency
       c.send(m);
     },
     kick(id) { const c = conns.get(id); if (c) c.close(); },
@@ -1873,7 +1873,7 @@ function mpLeave() { net.leave(); state = 'title'; stopMusic(); hidePicker(); mp
    The host simulates everything. Clients send inputs (20 Hz) and level-up choices; the host sends 15 Hz snapshots
    of everything near each client. Clients draw ~100 ms in the past (interpolated) and predict their own movement. */
 let enemySeq = 0, snapSeq = 0, snapTimer = 0, snaps = [], inTimer = 0, lastIn = '', inRep = 0, pkShown = false;
-const SNAP_MAX = 9500;                                  // bytes per snapshot: stays under the ~9.5 KB cross-browser data-channel limit
+const SNAP_MAX = 7500;                                  // bytes per snapshot: stays under the ~7.5 KB cross-browser data-channel limit
 const PCOL = ['#7dff3a', '#ffd02b', '#ff6aff', '#ff8c42', '#9d7bff', '#4de3c1', '#ff5c7a', '#ffffff'];   // teammate colours (you are always cyan)
 let netStat = { last: 0, lastSeq: 0, sz: 0, count: 0, c0: 0, t0: 0, rate: 0, err: '', lastResync: 0 }, showStats = false;
 const cp = new Map();                                  // client: idx -> player object
