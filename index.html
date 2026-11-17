@@ -1664,9 +1664,9 @@ function peerTransport() {
       });
     },
     send(to, m) {
-      const c = conns.get(to);
+      const dc = c.dataChannel || c._dc;
       if (!c || !c.open) return;
-      if (m.t === 's' && c.dataChannel && c.dataChannel.bufferedAmount > 65536) return;   // peer is behind: drop this snapshot instead of adding latency
+      if (m.t === 's' && dc && dc.bufferedAmount > 65536) return; // peer is behind: drop this snapshot instead of adding latency
       c.send(m);
     },
     kick(id) { const c = conns.get(id); if (c) c.close(); },
@@ -1873,7 +1873,7 @@ function mpLeave() { net.leave(); state = 'title'; stopMusic(); hidePicker(); mp
    The host simulates everything. Clients send inputs (20 Hz) and level-up choices; the host sends 15 Hz snapshots
    of everything near each client. Clients draw ~100 ms in the past (interpolated) and predict their own movement. */
 let enemySeq = 0, snapSeq = 0, snapTimer = 0, snaps = [], inTimer = 0, lastIn = '', inRep = 0, pkShown = false;
-const SNAP_MAX = 12000;                                  // bytes per snapshot: stays under the ~16 KB cross-browser data-channel limit
+const SNAP_MAX = 9500;                                  // bytes per snapshot: stays under the ~9.5 KB cross-browser data-channel limit
 const PCOL = ['#7dff3a', '#ffd02b', '#ff6aff', '#ff8c42', '#9d7bff', '#4de3c1', '#ff5c7a', '#ffffff'];   // teammate colours (you are always cyan)
 let netStat = { last: 0, lastSeq: 0, sz: 0, count: 0, c0: 0, t0: 0, rate: 0, err: '', lastResync: 0 }, showStats = false;
 const cp = new Map();                                  // client: idx -> player object
@@ -1902,9 +1902,10 @@ function hostGame(e, m) {
     if (m.vw) { p.vw = clamp(m.vw | 0, 320, 4000); p.vh = clamp(m.vh | 0, 240, 3000); }   // what this client can see
   }
   if (m.t === 'in') p.input = { dx: clamp(+m.dx || 0, -1, 1), dy: clamp(+m.dy || 0, -1, 1) };
-  else if (m.t === 'resync') {                                // client lost track (stall / tab was hidden): replay the run
-    net.tr.send(e.id, { t: 'start', seed: runSeed, late: 1 });
+  else if (m.t === 'resync') {
+    if (m.cold) net.tr.send(e.id, { t: 'start', seed: runSeed, late: 1 });
     if (p.pick) net.tr.send(e.id, { t: 'pick', choices: p.pick.choices });
+    broadcastSnap();
   }
   else if (m.t === 'pickd' && p.pick && Number.isInteger(m.i) && m.i >= 0 && m.i < p.pick.choices.length) resolvePick(p, m.i);
 }
@@ -2010,8 +2011,9 @@ function clientFrame(d) {
 }
 function clientFrame2(d) {
   const nowT = performance.now();
-  if (nowT - netStat.last > 1500 && nowT - netStat.lastResync > 2000) {                 // nothing from the host for a while: ask for a resync
-    netStat.lastResync = nowT; net.tr.send('host', { t: 'resync', vw: W, vh: H });
+  if (nowT - netStat.last > 1500 && nowT - netStat.lastResync > 2000) {
+    netStat.lastResync = nowT;
+    net.tr.send('host', { t: 'resync', vw: W, vh: H, cold: snaps.length === 0 ? 1 : 0 });
   }
   const rt = performance.now() - 100;                    // render slightly in the past so there is always a snapshot to blend to
   let a = null, b = null;
