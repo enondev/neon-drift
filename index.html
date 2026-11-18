@@ -151,7 +151,10 @@ const ACH = [
   { id: 'max',  n: 'Maxed Out',     d: 'Take a weapon to level 6',     t: () => Object.values(player.w).some(v => v >= 6) },
   { id: 'dc',   n: 'Daily Driver',  d: 'Last a minute in a Daily Challenge', t: () => /^D\d{4}-/.test(runSeed) && time >= 60 },
   { id: 'm1',   n: 'Risk Taker',    d: 'Last 5 minutes with a mutator', t: () => runMut > 0 && time >= 300 },
-  { id: 'm3',   n: 'Masochist',     d: 'Last 5 minutes with 3+ mutators', t: () => runMut.toString(2).replace(/0/g, '').length >= 3 && time >= 300 }
+  { id: 'm3',   n: 'Masochist',     d: 'Last 5 minutes with 3+ mutators', t: () => runMut.toString(2).replace(/0/g, '').length >= 3 && time >= 300 },
+  { id: 'g1',  n: 'Guardian Slayer',  d: 'Defeat a biome guardian',          t: () => S.gk > 0 },
+  { id: 'g4',  n: 'Biome Conqueror',  d: 'Defeat all four biome guardians',  t: () => S.gk === 15 },
+  { id: 'rl3', n: 'Relic Hunter',     d: 'Hold three relics at once',        t: () => !!player.relics && player.relics.length >= 3 }
 ];
 function unlockAch(a) {
   S.ach[a.id] = 1; save();
@@ -165,7 +168,7 @@ function checkAch() { if (player) for (const a of ACH) if (!S.ach[a.id] && a.t()
 const defaultSave = () => ({
   v: 1, shards: 0, up: { hp: 0, dmg: 0, spd: 0, mag: 0 },
   best: 0, runs: 0, kills: 0, daily: {}, fx: 1, mute: 0, nm: 0,
-  genre: 0, bot: 0, script: '', pend: '', ch: 0, mut: 0, bosses: 0, ach: {}
+  genre: 0, bot: 0, script: '', pend: '', ch: 0, mut: 0, bosses: 0, gk: 0, ach: {}
 });
 const lget = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const lset = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -184,7 +187,7 @@ function sanitize(raw) {
   d.genre = n(o.genre, 5); d.bot = n(o.bot, 2);
   if (typeof o.script === 'string') d.script = o.script.slice(0, 20000);
   if (typeof o.pend === 'string') d.pend = o.pend.slice(0, 20000);
-  d.ch = n(o.ch, CHAR.length - 1); d.mut = n(o.mut, (1 << MUT.length) - 1); d.bosses = n(o.bosses, 1e6);
+  d.gk = n(o.gk, 15); d.ch = n(o.ch, CHAR.length - 1); d.mut = n(o.mut, (1 << MUT.length) - 1); d.bosses = n(o.bosses, 1e6);
   if (o.ach && typeof o.ach === 'object') for (const a of ACH) if (o.ach[a.id]) d.ach[a.id] = 1;
   return d;
 }
@@ -690,7 +693,7 @@ function makePlayer(idx, ch) {
     dmg: 1 + 0.08 * u.dmg, rate: 1,
     mag: 70 * (1 + 0.15 * u.mag),
     w: { bolt: 1, orb: 0, nova: 0, arc: 0, mine: 0, shard: 0 },
-    pc: {}, evo: {}, area: 1, regen: 0, acd: 1, mcd: 1, scd: 1,
+    pc: {}, evo: {}, ex: {}, relics: [], area: 1, regen: 0, acd: 1, mcd: 1, scd: 1,
     cd: 0, ncd: 2, ang: 0, iv: 0
   };
   const c = CHAR[idx === 0 ? effChar() : clamp(ch | 0, 0, CHAR.length - 1)];      // character + mutator modifiers
@@ -707,6 +710,7 @@ function start(sd) {
   chunks = new Map();
   runMut = /^D\d{4}-/.test(seed) ? dailyMask(seed) : S.mut;   // daily challenge uses fixed mutators
   lastSec = 0;
+  guardSlain.clear(); guardActive.clear(); guardMem.clear(); hazards = []; relics = []; gT = 0; grng = mulberry(hashStr(seed + 'guardrng'));
   players = [player = makePlayer(0)];   // players[0] is the local player
   enemies = []; bullets = []; eBullets = []; gems = []; packs = []; rings = []; arcs = []; mines = [];
   time = 0; kills = 0; level = 1; xp = 0; xpNext = 5;
@@ -888,7 +892,7 @@ function fireBolt(p, dt) {
       if (d < bestD) { bestD = d; best = e; }
     }
     if (best && bestD < 640000) {
-      const evB = p.evo.bolt, n = 1 + (boltLv >= 3) + (boltLv >= 5) + (evB ? 2 : 0);
+      const evB = p.evo.bolt, n = 1 + (boltLv >= 3) + (boltLv >= 5) + (evB ? 2 : 0) + (p.ex.bolt | 0);
       const a = Math.atan2(best.y - p.y, best.x - p.x);
       for (let i = 0; i < n; i++) {
         const aa = a + (i - (n - 1) / 2) * 0.14;
@@ -1020,6 +1024,7 @@ function tick(dt) {
   time += dt; gcTimer += dt;
   if (net && net.role === 'host') netTick(dt);               // co-op: pick timeouts + snapshots
   if ((time | 0) !== lastSec) { lastSec = time | 0; checkAch(); }   // achievements are checked once per second
+  guardianTick(dt); updateHazards(dt); relicTick();            // biome guardians, their hazards, relic pickups
 
   for (const p of players) {
     let ix, iy;
@@ -1098,7 +1103,7 @@ function tick(dt) {
 
     // Keep far-away enemies from drifting forever
     const d = Math.hypot(target.x - e.x, target.y - e.y);
-    if (d > 1500) {
+    if (d > 1500 && !e.guardian) {
       const a = rng() * 6.283, np = nearestPlayer(e.x, e.y);
       e.x = np.x + Math.cos(a) * (Math.hypot(W, H) / 2 + 60);
       e.y = np.y + Math.sin(a) * (Math.hypot(W, H) / 2 + 60);
@@ -1244,6 +1249,14 @@ function draw() {
     }
 
     if (e.elite) { g.save(); g.strokeStyle = '#ffd02b'; g.lineWidth = 3; g.stroke(); g.restore(); }
+    if (e.guardian) {                                            // biome guardian: coloured ring, name and HP bar
+      g.save(); g.strokeStyle = e.warn ? '#fff' : e.c; g.lineWidth = 4; g.globalAlpha = e.aggro > 0 ? 1 : 0.65;
+      g.beginPath(); g.arc(e.x + ox, e.y + oy, e.r + 7, 0, 6.283); g.stroke(); g.globalAlpha = 1;
+      g.fillStyle = '#300'; g.fillRect(e.x + ox - 45, e.y + oy - e.r - 16, 90, 7);
+      g.fillStyle = e.c; g.fillRect(e.x + ox - 45, e.y + oy - e.r - 16, 90 * Math.max(0, e.hp / e.mh), 7);
+      g.fillStyle = '#fff'; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(ENEMY[e.k].name, e.x + ox, e.y + oy - e.r - 22);
+      g.restore();
+    }
     // Boss extras (unchanged)
     if (e.boss) {
       g.strokeStyle = e.cd < 0.6 ? '#fff' : '#ff2b4a'; g.lineWidth = 4; g.stroke();
@@ -1298,6 +1311,7 @@ function draw() {
     }
   }
   drawMates(ox, oy);
+  drawGuardianUI(ox, oy);
   g.shadowBlur = 0;
 
   // HUD
@@ -1307,7 +1321,7 @@ function draw() {
   g.fillStyle = '#19e6ff'; g.fillRect(0, 0, W * Math.min(1, xp / xpNext), 5);
   g.fillStyle = '#e8e6ff'; g.font = '14px system-ui';
   g.fillText(`Lv ${level}  ·  ${time / 60 | 0}:${String(time % 60 | 0).padStart(2, '0')}  ·  ${kills} kills  ·  ${enemies.length} enemies ·  ${biome.n}`, 10, 40);
-  g.fillText(`Bolt ${player.w.bolt}  Blades ${player.w.orb}  Nova ${player.w.nova}${player.w.arc ? '  Arc ' + player.w.arc : ''}${player.w.mine ? '  Mines ' + player.w.mine : ''}${player.w.shard ? '  Shards ' + player.w.shard : ''}`, 10, 58);
+  g.fillText(`Bolt ${player.w.bolt}  Blades ${player.w.orb}  Nova ${player.w.nova}${player.w.arc ? '  Arc ' + player.w.arc : ''}${player.w.mine ? '  Mines ' + player.w.mine : ''}${player.w.shard ? '  Shards ' + player.w.shard : ''}${player.relics && player.relics.length ? '  ★' + player.relics.length : ''}`, 10, 58);
   if (bot) g.fillText(`Bot: ${bot.down ? 'DOWN - stand near to revive' : Math.ceil(bot.hp) + ' HP'}${botMsg ? ' · ' + botMsg : ''}`, 10, 76);
   if (joy) {
     g.strokeStyle = '#fff6'; g.lineWidth = 2;
@@ -1918,7 +1932,7 @@ function netTick(dt) {
 function broadcastSnap() {
   const ps = players.map(p => [p.idx, p.x | 0, p.y | 0, Math.max(0, p.hp) | 0, p.mhp | 0, p.iv > 0 ? 1 : 0, (p.ang * 100) | 0, p.w.orb | 0, p.evo.orb ? 1 : 0, (p.area * 100) | 0, p.hp > 0 ? 0 : Math.max(0, p.bleed ?? 45) | 0, ((p.rv || 0) * 100) | 0]);
   const head = { t: 's', n: ++snapSeq, tm: +time.toFixed(2), kl: kills, xp: Math.floor(xp), xn: xpNext, lv: level, bc: bossCount, ps };
-  const rEn = q => [q.id, q.k, q.x | 0, q.y | 0, (q.fl > 0 ? 1 : 0) | (q.elite ? 2 : 0) | (q.boss ? 4 : 0), (q.cd * 10) | 0, q.boss ? Math.round(1000 * q.hp / q.mh) : 0];
+  const rEn = q => [q.id, q.k, q.x | 0, q.y | 0, (q.fl > 0 ? 1 : 0) | (q.elite ? 2 : 0) | (q.boss ? 4 : 0) | (q.guardian ? 8 : 0) | (q.aggro > 0 ? 16 : 0) | (q.warn ? 32 : 0), (q.cd * 10) | 0, q.boss || q.guardian ? Math.round(1000 * q.hp / q.mh) : 0];
   const rXY = q => [q.x | 0, q.y | 0], rGem = q => [q.x | 0, q.y | 0, q.v], rPk = q => [q.x | 0, q.y | 0, (q.life * 10) | 0], rMn = q => [q.x | 0, q.y | 0, q.t <= 0 ? 1 : 0];
   let maxLen = 0;
   for (const e of net.lobby) {
@@ -1926,7 +1940,7 @@ function broadcastSnap() {
     const hx = (p.vw || 1300) / 2 + 220, hy = (p.vh || 800) / 2 + 220;                  // the client's screen plus a margin
     const pick = (arr, cap, row, vip) => {                                              // nearest first, bosses always, at most `cap`
       const hit = [];
-      for (const q of arr) { const dx = q.x - p.x, dy = q.y - p.y; if (Math.abs(dx) < hx && Math.abs(dy) < hy) hit.push([vip && q.boss ? -1 : dx * dx + dy * dy, q]); }
+      for (const q of arr) { const dx = q.x - p.x, dy = q.y - p.y; if (Math.abs(dx) < hx && Math.abs(dy) < hy) hit.push([vip && (q.boss || q.guardian) ? -1 : dx * dx + dy * dy, q]); }
       if (hit.length > cap) hit.sort((a, b) => a[0] - b[0]);
       const out = []; for (let i = 0; i < hit.length && i < cap; i++) out.push(row(hit[i][1])); return out;
     };
@@ -1937,7 +1951,9 @@ function broadcastSnap() {
         me: { w: p.w, evo: p.evo, spd: p.spd, area: p.area, dmg: +p.dmg.toFixed(2), rate: +p.rate.toFixed(2) },
         es: pick(enemies, Math.floor(200 * f), rEn, true), bs: pick(bullets, Math.floor(150 * f), rXY), eb: pick(eBullets, Math.floor(150 * f), rXY),
         gm: pick(gems, Math.floor(120 * f), rGem), pk: pick(packs, 40, rPk), mn: pick(mines, 60, rMn),
-        ar: arcs.map(q => [q.x1 | 0, q.y1 | 0, q.x2 | 0, q.y2 | 0, (q.l * 100) | 0]), rg: rings.map(q => [q.x | 0, q.y | 0, q.r | 0, q.m | 0])
+        ar: arcs.map(q => [q.x1 | 0, q.y1 | 0, q.x2 | 0, q.y2 | 0, (q.l * 100) | 0]), rg: rings.map(q => [q.x | 0, q.y | 0, q.r | 0, q.m | 0]),
+        hz: hazards.map(h => [h.kind, h.x | 0, h.y | 0, h.r | 0, (h.age * 10) | 0, (h.delay * 10) | 0, (h.life * 10) | 0]),
+        rl: relics.map(q => [q.x | 0, q.y | 0, q.type]), gd: guardianCellsNear(p).map(c => [c.cx, c.cy, c.x | 0, c.y | 0])
       });
       len = JSON.stringify(m).length;
       if (len <= SNAP_MAX) break;
@@ -1991,6 +2007,7 @@ function coopStartClient(m) {
   S.bot = 0; seed = cleanSeed(m.seed); runSeed = seed; chunks = new Map(); runMut = 0;
   enemies = []; bullets = []; eBullets = []; gems = []; packs = []; rings = []; arcs = []; mines = [];
   time = 0; kills = 0; level = 1; xp = 0; xpNext = TUNE.xpNeed(1); bossCount = 0; cam = { x: 0, y: 0 };
+  hazards = []; relics = []; clientGuards = [];
   cp.clear(); player = makePlayer(net.idx); cp.set(net.idx, player); players = [player];
   snaps = []; inTimer = 0; lastIn = ''; netStat.lastSeq = 0; netStat.last = performance.now(); netStat.err = ''; net.onMsg = (e, msg) => clientGame(msg);
   hidePicker(); hide(); state = 'play'; startMusic();
@@ -2003,6 +2020,7 @@ function clientGame(m) {
   }
   else if (m.t === 'pick') showPicker(m.choices);
   else if (m.t === 'pickend') hidePicker();
+  else if (m.t === 'relic') netToast('★ ' + m.n + ': ' + m.d);
   else if (m.t === 'over') coopOver(m);
   else if (m.t === 'tolobby') { net.inGame = false; state = 'lobby'; stopMusic(); hidePicker(); lobbyScreen(); }
 }
@@ -2044,14 +2062,16 @@ function clientFrame2(d) {
   player = cp.get(net.idx);
   const em = new Map(a.es.map(r => [r[0], r]));
   enemies = s.es.map(r => {
-    const o = em.get(r[0]) || r, t = ENEMY[r[1]], el = (r[4] & 2) !== 0, bs = (r[4] & 4) !== 0;
+    const o = em.get(r[0]) || r, t = ENEMY[r[1]], el = (r[4] & 2) !== 0, bs = (r[4] & 4) !== 0, gu = (r[4] & 8) !== 0;
     return { id: r[0], k: r[1], x: o[2] + (r[2] - o[2]) * k, y: o[3] + (r[3] - o[3]) * k, r: t.r * (el ? 1.25 : 1), c: t.c,
-             fl: r[4] & 1 ? 0.05 : 0, elite: el, boss: bs, cd: r[5] / 10, hp: bs ? r[6] : 1, mh: bs ? 1000 : 1 };
+             fl: r[4] & 1 ? 0.05 : 0, elite: el, boss: bs, guardian: gu, aggro: (r[4] & 16) ? 1 : 0, warn: (r[4] & 32) ? 1 : 0, cd: r[5] / 10, hp: bs || gu ? r[6] : 1, mh: bs || gu ? 1000 : 1 };
   });
   bullets = s.bs.map(r => ({ x: r[0], y: r[1] })); eBullets = s.eb.map(r => ({ x: r[0], y: r[1] }));
   gems = s.gm.map(r => ({ x: r[0], y: r[1], v: r[2] })); packs = s.pk.map(r => ({ x: r[0], y: r[1], life: r[2] / 10 }));
   mines = s.mn.map(r => ({ x: r[0], y: r[1], t: r[2] ? 0 : 1 })); arcs = s.ar.map(r => ({ x1: r[0], y1: r[1], x2: r[2], y2: r[3], l: r[4] / 100 }));
   rings = s.rg.map(r => ({ x: r[0], y: r[1], r: r[2], m: r[3] }));
+  hazards = s.hz.map(r => ({ kind: r[0], x: r[1], y: r[2], r: r[3], age: r[4] / 10, delay: r[5] / 10, life: r[6] / 10 }));
+  relics = s.rl.map(r => ({ x: r[0], y: r[1], type: r[2] })); clientGuards = s.gd.map(r => ({ cx: r[0], cy: r[1], x: r[2], y: r[3] }));
   cam.x += (player.x - cam.x) * 0.12; cam.y += (player.y - cam.y) * 0.12;
   inTimer += d;
   if (inTimer >= 0.05) {                                  // 20 Hz input, repeated now and then so a lost packet heals
@@ -2096,6 +2116,176 @@ function coopRejoin(e) {                                          // a dropped p
   if (p.pick) net.tr.send(e.id, { t: 'pick', choices: p.pick.choices });
   netToast(e.name + ' reconnected');
 }
+
+/* ========== Biome guardians ==========
+   Every biome cell (1536 px square, the same grid that decides biomes) may hold a guardian of that biome's kind.
+   It roams inside its cell and ignores everyone until a player enters the cell (or comes within 450 px), then it
+   hunts with its own abilities. Killing it drops a unique relic (permanent upgrade), XP, shards and health. */
+const CELL = 1536, GUARD_ON = true;
+let hazards = [], relics = [], gT = 0, grng = Math.random, clientGuards = [];
+const guardSlain = new Set(), guardActive = new Map(), guardMem = new Map();
+ENEMY.push(                                                       // k = 8 + biome index
+  { name: 'Prism Warden',   ai: 'guard', guardian: true, hp: 1800, s: 70, r: 30, d: 18, c: '#19e6ff', death: 'guardian' },
+  { name: 'Cinder Tyrant',  ai: 'guard', guardian: true, hp: 2200, s: 58, r: 34, d: 22, c: '#ff6a2b', death: 'guardian' },
+  { name: 'Bloom Mother',   ai: 'guard', guardian: true, hp: 2000, s: 54, r: 36, d: 16, c: '#7dff3a', death: 'guardian' },
+  { name: 'Void Sovereign', ai: 'guard', guardian: true, hp: 2400, s: 64, r: 32, d: 20, c: '#d46bff', death: 'guardian' }
+);
+const RELIC = [   // one unique relic per guardian; each can be collected up to 3 times
+  { n: 'Prism Lens',  d: 'Bolt fires +1 shot, +10% damage',    c: '#19e6ff', apply: p => { p.ex.bolt = (p.ex.bolt | 0) + 1; p.dmg *= 1.1; } },
+  { n: 'Cinder Core', d: '+20% damage, +20% area',             c: '#ff6a2b', apply: p => { p.dmg *= 1.2; p.area *= 1.2; } },
+  { n: 'Bloom Heart', d: '+40 max HP, +1 HP regeneration/s',   c: '#7dff3a', apply: p => { p.mhp += 40; p.hp += 40; p.regen += 1; } },
+  { n: 'Void Shard',  d: '+20% speed, +60% pickup range',      c: '#d46bff', apply: p => { p.spd *= 1.2; p.mag *= 1.6; } }
+];
+const guardType = (cx, cy) => BIOMES.indexOf(biomeAt(cx * CELL + 1, cy * CELL + 1));
+const hasGuardian = (cx, cy) => GUARD_ON && (cx !== 0 || cy !== 0) && hashStr(seed + 'G' + cx + ',' + cy) % 100 < 55 && !guardSlain.has(cx + ',' + cy);
+const guardianHome = (cx, cy) => ({ x: cx * CELL + 350 + hashStr(seed + 'Gx' + cx + ',' + cy) % (CELL - 700), y: cy * CELL + 350 + hashStr(seed + 'Gy' + cx + ',' + cy) % (CELL - 700) });
+function guardianCellsNear(p) {                                    // nearest guardian cells (also drives the edge markers)
+  const out = [], cx0 = Math.floor(p.x / CELL), cy0 = Math.floor(p.y / CELL);
+  for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
+    const cx = cx0 + i, cy = cy0 + j; if (!hasGuardian(cx, cy)) continue;
+    const at = guardActive.get(cx + ',' + cy) || guardianHome(cx, cy);
+    out.push({ cx, cy, x: at.x, y: at.y, d: dist2(at.x, at.y, p.x, p.y) });
+  }
+  out.sort((a, b) => a.d - b.d); return out.slice(0, 3);
+}
+function spawnGuardian(cx, cy) {
+  const key = cx + ',' + cy, type = guardType(cx, cy), t = ENEMY[8 + type], mem = guardMem.get(key), home = guardianHome(cx, cy);
+  const ring = Math.max(Math.abs(cx), Math.abs(cy)), hp = mem ? mem.mh : t.hp * (0.7 + 0.3 * TUNE.hpMult(time)) * (1 + 0.3 * ring) * crowd(0.5), dm = TUNE.dmgMult(time);
+  const e = { id: ++enemySeq, k: 8 + type, boss: false, guardian: true, x: mem ? mem.x : home.x, y: mem ? mem.y : home.y, r: t.r, hp: mem ? mem.hp : hp, mh: hp,
+              s: t.s, d: t.d * dm, dm, c: t.c, cd: 5, fl: 0, oc: 0, lb: null, home: { cx, cy, key }, aggro: 0 };
+  enemies.push(e); guardActive.set(key, e);
+}
+function guardianTick(dt) {
+  if (!GUARD_ON) return;
+  if ((gT -= dt) > 0) return;
+  gT = 0.5;
+  for (const p of players) {                                       // wake guardians near any player
+    if (p.hp <= 0 || p.afk) continue;
+    const cx0 = Math.floor(p.x / CELL), cy0 = Math.floor(p.y / CELL);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      const cx = cx0 + i, cy = cy0 + j;
+      if (!hasGuardian(cx, cy) || guardActive.has(cx + ',' + cy)) continue;
+      const h = guardMem.get(cx + ',' + cy) || guardianHome(cx, cy);
+      if (Math.hypot(h.x - p.x, h.y - p.y) < 1500) spawnGuardian(cx, cy);
+    }
+  }
+  for (let i = enemies.length - 1; i >= 0; i--) {                  // park guardians nobody is near (they keep their HP)
+    const e = enemies[i]; if (!e.guardian) continue;
+    let near = false;
+    for (const p of players) if (p.hp > 0 && !p.afk && Math.hypot(p.x - e.x, p.y - e.y) < 2600) { near = true; break; }
+    if (!near) { guardMem.set(e.home.key, { hp: e.hp, mh: e.mh, x: e.x, y: e.y }); guardActive.delete(e.home.key); enemies.splice(i, 1); }
+  }
+}
+function hurtIn(x, y, r, dmg, iv) { for (const p of players) if (p.hp > 0 && !p.afk && p.iv <= 0 && Math.hypot(p.x - x, p.y - y) < r + p.r) { p.hp -= dmg; p.iv = iv; } }
+function updateHazards(dt) {
+  for (let i = hazards.length - 1; i >= 0; i--) {
+    const h = hazards[i]; h.age += dt;
+    if (h.kind === 0 && !h.done && h.age >= h.delay) { h.done = true; hurtIn(h.x, h.y, h.r, h.dmg, 0.4); rings.push({ x: h.x, y: h.y, r: 0, m: h.r }); }          // meteor
+    else if (h.kind === 1 && h.age > 0) { for (const p of players) if (p.hp > 0 && !p.afk && Math.hypot(p.x - h.x, p.y - h.y) < h.r + p.r) p.hp -= h.dmg * dt; }   // poison cloud
+    else if (h.kind === 2 && h.age >= h.delay && h.age < h.delay + 0.8) {                                                                                            // gravity pull
+      for (const p of players) { if (p.hp <= 0 || p.afk) continue; const dx = h.x - p.x, dy = h.y - p.y, d = Math.hypot(dx, dy); if (d < h.r && d > 12) { p.x += dx / d * 240 * dt; p.y += dy / d * 240 * dt; pushOut(p); } }
+    }
+    if (h.kind === 2 && !h.burst && h.age >= h.delay + 0.8) { h.burst = true; for (let j = 0; j < 14; j++) fire({ x: h.x, y: h.y, dm: h.dm }, j * 0.449, 150, 10); }
+    if (h.age >= h.life) hazards.splice(i, 1);
+  }
+}
+function guardAI(e, dt) {
+  const type = e.k - 8, c = e.home, x0 = c.cx * CELL, y0 = c.cy * CELL;
+  let tgt = null, bd = Infinity;
+  for (const p of players) {
+    if (p.hp <= 0 || p.afk) continue;
+    const d = Math.hypot(p.x - e.x, p.y - e.y), inside = p.x >= x0 && p.x < x0 + CELL && p.y >= y0 && p.y < y0 + CELL;
+    if ((inside || d < 450) && d < bd) { bd = d; tgt = p; }
+  }
+  e.aggro = tgt ? 8 : Math.max(0, (e.aggro || 0) - dt);
+  if (!tgt && !e.aggro) {                                          // roam inside the home cell until someone shows up
+    e.hp = Math.min(e.mh, e.hp + e.mh * 0.02 * dt); e.warn = 0;
+    if (!e.wp || (e.wt -= dt) <= 0 || Math.hypot(e.wp.x - e.x, e.wp.y - e.y) < 40) { e.wp = { x: x0 + 250 + grng() * (CELL - 500), y: y0 + 250 + grng() * (CELL - 500) }; e.wt = 6; }
+    moveToward(e, e.wp.x, e.wp.y, e.s * 0.45, dt); return;
+  }
+  const t = tgt || nearestPlayer(e.x, e.y), enr = e.hp < e.mh * 0.4 ? 1.3 : 1, dist = Math.hypot(t.x - e.x, t.y - e.y);
+  const st = e.st || (e.st = { a: 3, b: 6, c: 9, w: 0, burst: 0, bt: 0, dash: 0, ang: 0, dx: 0, dy: 0 });
+  if (type === 0) {                                                // Prism Warden: prism bursts, telegraphed dash, summons drones
+    if (st.dash > 0) { st.dash -= dt; moveToward(e, st.dx, st.dy, 520, dt); e.warn = 0; return; }
+    if (st.w > 0) { st.w -= dt; e.warn = 1; if (st.w <= 0) { st.dash = 0.45; st.dx = t.x + (t.x - e.x) * 0.3; st.dy = t.y + (t.y - e.y) * 0.3; e.warn = 0; } return; }
+    if (dist > 140) moveToward(e, t.x, t.y, e.s * enr, dt);
+    if ((st.a -= dt) <= 0) { st.a = 4.2 / enr; st.burst = 3; st.bt = 0; st.ang = grng() * 6.283; }
+    if (st.burst > 0 && (st.bt -= dt) <= 0) { st.bt = 0.3; st.burst--; for (let j = 0; j < 8; j++) fire(e, st.ang + j * 0.785 + st.burst * 0.39, 170, 9); }
+    if ((st.b -= dt) <= 0) { st.b = 7 / enr; st.w = 0.8; }
+    if (e.hp < e.mh * 0.6 && (st.c -= dt) <= 0) { st.c = 12; for (let j = 0; j < 4; j++) enemies.push(makeEnemy(1, e.x + (j - 1.5) * 40, e.y, ENEMY[1].hp * TUNE.hpMult(time))); }
+  } else if (type === 1) {                                         // Cinder Tyrant: meteor rain, lava rings, enrages
+    if (dist > 160) moveToward(e, t.x, t.y, e.s * enr, dt);
+    if ((st.a -= dt) <= 0) { st.a = 5 / enr; for (let j = 0; j < 3; j++) hazards.push({ kind: 0, x: t.x + (grng() - 0.5) * 220, y: t.y + (grng() - 0.5) * 220, r: 72, age: 0, delay: 1.1, life: 1.6, dmg: 34 * e.dm, dm: e.dm }); }
+    if ((st.b -= dt) <= 0) { st.b = 6.5; for (let j = 0; j < 16; j++) fire(e, j * 0.3927 + st.ang, 120, 11); st.ang += 0.2; }
+  } else if (type === 2) {                                         // Bloom Mother: spore fans, splitter spawns, poison clouds
+    if (dist > 220) moveToward(e, t.x, t.y, e.s, dt);
+    if ((st.a -= dt) <= 0) { st.a = 3.5; const a0 = angleTo(e, t); for (let j = -3; j <= 3; j++) fire(e, a0 + j * 0.16, 130, 8); }
+    if ((st.b -= dt) <= 0) { st.b = 9; for (let j = 0; j < 2; j++) enemies.push(makeEnemy(4, e.x + (j ? 40 : -40), e.y, ENEMY[4].hp * TUNE.hpMult(time))); }
+    if ((st.c -= dt) <= 0) { st.c = 8; hazards.push({ kind: 1, x: e.x, y: e.y, r: 115, age: 0, delay: 0, life: 6, dmg: 12 * e.dm, dm: e.dm }); }
+  } else {                                                         // Void Sovereign: blink strikes, gravity pulse, spiral at half HP
+    if (st.w > 0) { st.w -= dt; e.warn = 1; if (st.w <= 0) { e.x = t.x + Math.cos(st.ang) * 170; e.y = t.y + Math.sin(st.ang) * 170; e.warn = 0; for (let j = 0; j < 12; j++) fire(e, j * 0.5236, 150, 10); } return; }
+    if (dist > 200) moveToward(e, t.x, t.y, e.s * enr, dt);
+    if ((st.a -= dt) <= 0) { st.a = 6; st.w = 0.7; st.ang = grng() * 6.283; }
+    if ((st.b -= dt) <= 0) { st.b = 8.5; hazards.push({ kind: 2, x: e.x, y: e.y, r: 430, age: 0, delay: 1.2, life: 2.1, dmg: 0, dm: e.dm }); }
+    if (e.hp < e.mh * 0.5 && (st.bt -= dt) <= 0) { st.bt = 0.28; st.dx += 0.5; fire(e, st.dx, 140, 8); }
+  }
+}
+AI.guard = (e, dt) => guardAI(e, dt);
+DEATH.guardian = e => guardianKilled(e);
+function guardianKilled(e) {
+  const type = e.k - 8, ring = Math.max(Math.abs(e.home.cx), Math.abs(e.home.cy));
+  guardSlain.add(e.home.key); guardActive.delete(e.home.key); guardMem.delete(e.home.key);
+  S.gk |= 1 << type; S.bosses++; S.shards += 12 + 3 * ring;
+  relics.push({ x: e.x, y: e.y, type });
+  for (let i = 0; i < 12; i++) gems.push({ x: e.x + (grng() - 0.5) * 120, y: e.y + (grng() - 0.5) * 120, v: 3 });
+  for (let i = 0; i < 2; i++) packs.push({ x: e.x + (i ? 50 : -50), y: e.y, life: PACK_LIFE * 2 });
+  netToast(ENEMY[e.k].name + ' defeated! Collect its relic.');
+}
+function relicTick() {
+  for (let i = relics.length - 1; i >= 0; i--) {
+    const r = relics[i], p = nearestPlayer(r.x, r.y);
+    if (p.hp > 0 && !p.afk && Math.hypot(p.x - r.x, p.y - r.y) < 34) { relics.splice(i, 1); grantRelic(p, r.type); }
+  }
+}
+function grantRelic(p, type) {
+  const def = RELIC[type], maxed = p.relics.filter(t => t === type).length >= 3;
+  if (maxed) { xp += xpNext * 0.5; p.hp = p.mhp; } else { p.relics.push(type); def.apply(p); }
+  const msg = maxed ? 'Relic power maxed: bonus XP and a full heal' : def.d, name = def.n;
+  if (p === player) netToast('★ ' + name + ': ' + msg); else if (net && net.tr && p.netId) net.tr.send(p.netId, { t: 'relic', n: name, d: msg });
+}
+/* ----- guardian drawing: hazards, relic pickups, edge markers toward guardians, and the fight's HP bar ----- */
+function edgeMark(sx, sy, col, text) {
+  const cx = W / 2, cy = H / 2, dx = sx - cx, dy = sy - cy, m = 34;
+  const k = Math.min((cx - m) / Math.max(Math.abs(dx), 1e-6), (cy - m) / Math.max(Math.abs(dy), 1e-6)), ax = cx + dx * k, ay = cy + dy * k;
+  g.fillStyle = col; g.beginPath(); g.moveTo(ax, ay - 11); g.lineTo(ax + 9, ay); g.lineTo(ax, ay + 11); g.lineTo(ax - 9, ay); g.closePath(); g.fill();
+  g.fillStyle = '#fff'; g.textAlign = 'center'; g.font = '12px system-ui';
+  g.fillText(text, Math.min(W - 80, Math.max(80, ax)), Math.min(H - 12, Math.max(22, ay + (ay < cy ? 26 : -16))));
+}
+function drawGuardianUI(ox, oy) {
+  g.save();
+  for (const h of hazards) {
+    const sx = h.x + ox, sy = h.y + oy; g.lineWidth = 2;
+    if (h.kind === 0) { const f = Math.min(1, h.age / h.delay); g.strokeStyle = '#ff6a2b'; g.fillStyle = 'rgba(255,106,43,' + (0.1 + 0.3 * f) + ')'; g.beginPath(); g.arc(sx, sy, h.r, 0, 6.283); g.fill(); g.stroke(); if (f < 1) { g.beginPath(); g.arc(sx, sy, h.r * f, 0, 6.283); g.stroke(); } }
+    else if (h.kind === 1) { g.strokeStyle = '#7dff3a'; g.fillStyle = 'rgba(125,255,58,0.16)'; g.beginPath(); g.arc(sx, sy, h.r, 0, 6.283); g.fill(); g.stroke(); }
+    else { const f = Math.min(1, h.age / (h.delay + 0.8)); g.strokeStyle = '#d46bff'; g.fillStyle = 'rgba(212,107,255,0.07)'; g.beginPath(); g.arc(sx, sy, h.r * (1 - 0.6 * f), 0, 6.283); g.fill(); g.stroke(); }
+  }
+  for (const r of relics) {
+    const sx = r.x + ox, sy = r.y + oy, pul = 11 + 3 * Math.sin(time * 6);
+    g.fillStyle = RELIC[r.type].c; g.globalAlpha = 0.25; g.beginPath(); g.arc(sx, sy, pul + 8, 0, 6.283); g.fill(); g.globalAlpha = 1;
+    g.beginPath(); g.moveTo(sx, sy - pul); g.lineTo(sx + pul * 0.7, sy); g.lineTo(sx, sy + pul); g.lineTo(sx - pul * 0.7, sy); g.closePath(); g.fill();
+  }
+  for (const m of guardMarks()) {
+    const ty = guardType(m.cx, m.cy), sx = m.x + ox, sy = m.y + oy;
+    if (!(sx > 20 && sx < W - 20 && sy > 20 && sy < H - 20)) edgeMark(sx, sy, BIOMES[ty].ob, ENEMY[8 + ty].name + ' · ' + Math.round(Math.hypot(m.x - player.x, m.y - player.y) / 10) + 'm');
+  }
+  const gd = enemies.find(e => e.guardian && e.aggro > 0 && Math.hypot(e.x - player.x, e.y - player.y) < 1300);
+  if (gd) {
+    g.fillStyle = '#0009'; g.fillRect(W / 2 - 162, 12, 324, 14); g.fillStyle = gd.c; g.fillRect(W / 2 - 160, 14, 320 * Math.max(0, gd.hp / gd.mh), 10);
+    g.fillStyle = '#fff'; g.textAlign = 'center'; g.font = '13px system-ui'; g.fillText(ENEMY[gd.k].name, W / 2, 42);
+  }
+  g.restore();
+}
+function guardMarks() { return (net && net.role === 'client' ? clientGuards : guardianCellsNear(player)).slice(0, 3); }
 
 /* ----- teammate indicators: name tags on screen, edge arrows (with distance) when they are off screen ----- */
 function drawMates(ox, oy) {
