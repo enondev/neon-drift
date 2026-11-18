@@ -1024,7 +1024,7 @@ function tick(dt) {
   time += dt; gcTimer += dt;
   if (net && net.role === 'host') netTick(dt);               // co-op: pick timeouts + snapshots
   if ((time | 0) !== lastSec) { lastSec = time | 0; checkAch(); }   // achievements are checked once per second
-  guardianTick(dt); updateHazards(dt); relicTick();            // biome guardians, their hazards, relic pickups
+  guardianTick(dt); updateHazards(dt); relicTick(); botSync(dt); autoRevive(dt);   // guardians, hazards, relics, bot HP sync, bot auto-revive
 
   for (const p of players) {
     let ix, iy;
@@ -1250,11 +1250,12 @@ function draw() {
 
     if (e.elite) { g.save(); g.strokeStyle = '#ffd02b'; g.lineWidth = 3; g.stroke(); g.restore(); }
     if (e.guardian) {                                            // biome guardian: coloured ring, name and HP bar
-      g.save(); g.strokeStyle = e.warn ? '#fff' : e.c; g.lineWidth = 4; g.globalAlpha = e.aggro > 0 ? 1 : 0.65;
+      g.save(); g.strokeStyle = e.warn ? '#fff' : e.c; g.lineWidth = 4 + (((e.mx | 0) >> 3) & 3); g.globalAlpha = e.aggro > 0 ? 1 : 0.65;
       g.beginPath(); g.arc(e.x + ox, e.y + oy, e.r + 7, 0, 6.283); g.stroke(); g.globalAlpha = 1;
       g.fillStyle = '#300'; g.fillRect(e.x + ox - 45, e.y + oy - e.r - 16, 90, 7);
       g.fillStyle = e.c; g.fillRect(e.x + ox - 45, e.y + oy - e.r - 16, 90 * Math.max(0, e.hp / e.mh), 7);
       g.fillStyle = '#fff'; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(ENEMY[e.k].name, e.x + ox, e.y + oy - e.r - 22);
+      const tg = guardTags(e); if (tg) { g.fillStyle = e.c; g.font = '10px system-ui'; g.fillText(tg, e.x + ox, e.y + oy - e.r - 34); }
       g.restore();
     }
     // Boss extras (unchanged)
@@ -1322,7 +1323,7 @@ function draw() {
   g.fillStyle = '#e8e6ff'; g.font = '14px system-ui';
   g.fillText(`Lv ${level}  ·  ${time / 60 | 0}:${String(time % 60 | 0).padStart(2, '0')}  ·  ${kills} kills  ·  ${enemies.length} enemies ·  ${biome.n}`, 10, 40);
   g.fillText(`Bolt ${player.w.bolt}  Blades ${player.w.orb}  Nova ${player.w.nova}${player.w.arc ? '  Arc ' + player.w.arc : ''}${player.w.mine ? '  Mines ' + player.w.mine : ''}${player.w.shard ? '  Shards ' + player.w.shard : ''}${player.relics && player.relics.length ? '  ★' + player.relics.length : ''}`, 10, 58);
-  if (bot) g.fillText(`Bot: ${bot.down ? 'DOWN - stand near to revive' : Math.ceil(bot.hp) + ' HP'}${botMsg ? ' · ' + botMsg : ''}`, 10, 76);
+  if (bot) g.fillText(`Bot: ${bot.down ? 'DOWN - up in ' + Math.max(0, Math.ceil(REVIVE_T - (bot.adn || 0))) + 's, or stand near' : Math.ceil(bot.hp) + ' HP'}${botMsg ? ' · ' + botMsg : ''}`, 10, 76);
   if (joy) {
     g.strokeStyle = '#fff6'; g.lineWidth = 2;
     g.beginPath(); g.arc(joy.x, joy.y, 50, 0, 6.283); g.stroke();
@@ -1932,7 +1933,7 @@ function netTick(dt) {
 function broadcastSnap() {
   const ps = players.map(p => [p.idx, p.x | 0, p.y | 0, Math.max(0, p.hp) | 0, p.mhp | 0, p.iv > 0 ? 1 : 0, (p.ang * 100) | 0, p.w.orb | 0, p.evo.orb ? 1 : 0, (p.area * 100) | 0, p.hp > 0 ? 0 : Math.max(0, p.bleed ?? 45) | 0, ((p.rv || 0) * 100) | 0]);
   const head = { t: 's', n: ++snapSeq, tm: +time.toFixed(2), kl: kills, xp: Math.floor(xp), xn: xpNext, lv: level, bc: bossCount, ps };
-  const rEn = q => [q.id, q.k, q.x | 0, q.y | 0, (q.fl > 0 ? 1 : 0) | (q.elite ? 2 : 0) | (q.boss ? 4 : 0) | (q.guardian ? 8 : 0) | (q.aggro > 0 ? 16 : 0) | (q.warn ? 32 : 0), (q.cd * 10) | 0, q.boss || q.guardian ? Math.round(1000 * q.hp / q.mh) : 0];
+  const rEn = q => [q.id, q.k, q.x | 0, q.y | 0, (q.fl > 0 ? 1 : 0) | (q.elite ? 2 : 0) | (q.boss ? 4 : 0) | (q.guardian ? 8 : 0) | (q.aggro > 0 ? 16 : 0) | (q.warn ? 32 : 0) | (q.guardian ? (q.mx | 0) << 6 : 0), (q.cd * 10) | 0, q.boss || q.guardian ? Math.round(1000 * q.hp / q.mh) : 0];
   const rXY = q => [q.x | 0, q.y | 0], rGem = q => [q.x | 0, q.y | 0, q.v], rPk = q => [q.x | 0, q.y | 0, (q.life * 10) | 0], rMn = q => [q.x | 0, q.y | 0, q.t <= 0 ? 1 : 0];
   let maxLen = 0;
   for (const e of net.lobby) {
@@ -2064,7 +2065,7 @@ function clientFrame2(d) {
   enemies = s.es.map(r => {
     const o = em.get(r[0]) || r, t = ENEMY[r[1]], el = (r[4] & 2) !== 0, bs = (r[4] & 4) !== 0, gu = (r[4] & 8) !== 0;
     return { id: r[0], k: r[1], x: o[2] + (r[2] - o[2]) * k, y: o[3] + (r[3] - o[3]) * k, r: t.r * (el ? 1.25 : 1), c: t.c,
-             fl: r[4] & 1 ? 0.05 : 0, elite: el, boss: bs, guardian: gu, aggro: (r[4] & 16) ? 1 : 0, warn: (r[4] & 32) ? 1 : 0, cd: r[5] / 10, hp: bs || gu ? r[6] : 1, mh: bs || gu ? 1000 : 1 };
+             fl: r[4] & 1 ? 0.05 : 0, elite: el, boss: bs, guardian: gu, aggro: (r[4] & 16) ? 1 : 0, warn: (r[4] & 32) ? 1 : 0, mx: gu ? r[4] >> 6 : 0, cd: r[5] / 10, hp: bs || gu ? r[6] : 1, mh: bs || gu ? 1000 : 1 };
   });
   bullets = s.bs.map(r => ({ x: r[0], y: r[1] })); eBullets = s.eb.map(r => ({ x: r[0], y: r[1] }));
   gems = s.gm.map(r => ({ x: r[0], y: r[1], v: r[2] })); packs = s.pk.map(r => ({ x: r[0], y: r[1], life: r[2] / 10 }));
@@ -2086,21 +2087,22 @@ function netToast(text) {
   const t = $('toast'); t.innerHTML = esc(text); t.style.display = 'block';
   if (typeof setTimeout === 'function') setTimeout(() => { t.style.display = 'none'; }, 3000);
 }
-/* A downed player (HP 0) can be revived by a teammate standing next to them for 3 s; after 45 s they are out for the run. */
+/* A downed player (HP 0) can be revived by a teammate standing next to them for 3 s; after 45 s they get back up on their own. */
+function standUp(p, auto) {                                       // hover revive (3 s) or the 45 s auto-revive
+  p.hp = p.mhp * 0.5; p.iv = auto ? 3 : 2; p.rv = 0; p.bleed = undefined;
+  for (let i = Math.min(p.missed || 0, 3); i > 0; i--) offerPick(p);        // level-ups missed while down
+  p.missed = 0; netToast((p.name || 'A player') + (auto ? ' got back up' : ' was revived'));
+}
 function reviveTick(dt) {
   for (const p of players) {
     if (p.afk) p.iv = Math.max(p.iv, 0.5);                       // a disconnected player cannot be hurt while away
     if (p.hp > 0 || p.gone || p.dead) continue;
     p.bleed = (p.bleed === undefined ? 45 : p.bleed) - dt;
-    if (p.bleed <= 0) { p.dead = true; p.bleed = 0; continue; }
+    if (p.bleed <= 0) { standUp(p, true); continue; }
     let helper = false;
     for (const q of players) if (q !== p && q.hp > 0 && !q.afk && dist2(q.x, q.y, p.x, p.y) < 3600) { helper = true; break; }
     p.rv = helper ? (p.rv || 0) + dt : Math.max(0, (p.rv || 0) - dt);
-    if (p.rv >= 3) {
-      p.hp = p.mhp * 0.5; p.iv = 2; p.rv = 0; p.bleed = undefined;
-      for (let i = Math.min(p.missed || 0, 3); i > 0; i--) offerPick(p);        // level-ups missed while down
-      p.missed = 0; netToast((p.name || 'A player') + ' was revived');
-    }
+    if (p.rv >= 3) standUp(p, false);
   }
 }
 function coopLate(e) {                                            // someone joins a run that is already going
@@ -2120,8 +2122,11 @@ function coopRejoin(e) {                                          // a dropped p
 /* ========== Biome guardians ==========
    Every biome cell (1536 px square, the same grid that decides biomes) may hold a guardian of that biome's kind.
    It roams inside its cell and ignores everyone until a player enters the cell (or comes within 450 px), then it
-   hunts with its own abilities. Killing it drops a unique relic (permanent upgrade), XP, shards and health. */
-const CELL = 1536, GUARD_ON = true;
+   hunts. Guardians are not copies of one script: each carries a seeded genome (an affix plus the three foreign
+   powers in its own order), unlocks borrowed powers as its HP drops (phases), and grows stronger and rotates its
+   borrowed powers every time a fight is restarted. Killing it drops a unique relic (permanent upgrade), XP,
+   shards and health. */
+const CELL = 1536, GUARD_ON = true, REVIVE_T = 45;
 let hazards = [], relics = [], gT = 0, grng = Math.random, clientGuards = [];
 const guardSlain = new Set(), guardActive = new Map(), guardMem = new Map();
 ENEMY.push(                                                       // k = 8 + biome index
@@ -2139,6 +2144,8 @@ const RELIC = [   // one unique relic per guardian; each can be collected up to 
 const guardType = (cx, cy) => BIOMES.indexOf(biomeAt(cx * CELL + 1, cy * CELL + 1));
 const hasGuardian = (cx, cy) => GUARD_ON && (cx !== 0 || cy !== 0) && hashStr(seed + 'G' + cx + ',' + cy) % 100 < 55 && !guardSlain.has(cx + ',' + cy);
 const guardianHome = (cx, cy) => ({ x: cx * CELL + 350 + hashStr(seed + 'Gx' + cx + ',' + cy) % (CELL - 700), y: cy * CELL + 350 + hashStr(seed + 'Gy' + cx + ',' + cy) % (CELL - 700) });
+const AFFIX = ['Swift', 'Brutal', 'Volatile', 'Regenerating'], TOUCH = ['Prismatic', 'Molten', 'Blighted', 'Voidborn'];   // affixes; adjectives for borrowed powers
+const GKEEP = [140, 160, 220, 200];                                // preferred distance per kit (index = guardian type)
 function guardianCellsNear(p) {                                    // nearest guardian cells (also drives the edge markers)
   const out = [], cx0 = Math.floor(p.x / CELL), cy0 = Math.floor(p.y / CELL);
   for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
@@ -2148,12 +2155,26 @@ function guardianCellsNear(p) {                                    // nearest gu
   }
   out.sort((a, b) => a.d - b.d); return out.slice(0, 3);
 }
+function guardGenome(cx, cy, type, ring) {                         // deterministic per seed + cell, so every client agrees
+  const h = hashStr(seed + 'Gm' + cx + ',' + cy), others = [0, 1, 2, 3].filter(t => t !== type), r = h % 3;
+  const ab = others.slice(r).concat(others.slice(0, r)); if ((h >>> 4) & 1) ab.reverse();      // the 3 foreign powers, in this guardian's own order
+  let aff = h % 5 === 4 ? -1 : (h >>> 8) % 4; if (aff < 0 && ring >= 2) aff = (h >>> 12) % 4;   // far guardians always carry an affix
+  return { aff, ab, tier: clamp(ring - 1 + ((time / 240) | 0), 0, 5) };                        // tier grows with distance and with run time
+}
+const gTier = e => e.gn.tier + Math.min(3, Math.max(0, (e.eno | 0) - 1));        // every restarted fight adds a tier (max +3)
+function setKits(e) {                                              // own kit + borrowed powers unlocked by phase; encodes mutations for snapshots
+  const nb = gTier(e) >= 2 ? 2 : 1, bm0 = Math.max(0, (e.eno | 0) - 1); let bm = 0; e.kits = [e.k - 8];
+  for (let i = 0; i < Math.min(e.ph, nb); i++) { const ty = e.gn.ab[(bm0 + i) % 3]; e.kits.push(ty); bm |= 1 << ty; }
+  e.mx = (e.gn.aff + 1) | (e.ph << 3) | (bm << 5);
+}
 function spawnGuardian(cx, cy) {
-  const key = cx + ',' + cy, type = guardType(cx, cy), t = ENEMY[8 + type], mem = guardMem.get(key), home = guardianHome(cx, cy);
-  const ring = Math.max(Math.abs(cx), Math.abs(cy)), hp = mem ? mem.mh : t.hp * (0.7 + 0.3 * TUNE.hpMult(time)) * (1 + 0.3 * ring) * crowd(0.5), dm = TUNE.dmgMult(time);
+  const key = cx + ',' + cy, type = guardType(cx, cy), t = ENEMY[8 + type], mem = guardMem.get(key), home = guardianHome(cx, cy), ring = Math.max(Math.abs(cx), Math.abs(cy));
+  const gn = mem ? mem.gn : guardGenome(cx, cy, type, ring), dm = TUNE.dmgMult(time) * (gn.aff === 1 ? 1.3 : 1);
+  const hp = mem ? mem.mh : t.hp * (0.7 + 0.3 * TUNE.hpMult(time)) * (1 + 0.3 * ring) * crowd(0.5);
   const e = { id: ++enemySeq, k: 8 + type, boss: false, guardian: true, x: mem ? mem.x : home.x, y: mem ? mem.y : home.y, r: t.r, hp: mem ? mem.hp : hp, mh: hp,
-              s: t.s, d: t.d * dm, dm, c: t.c, cd: 5, fl: 0, oc: 0, lb: null, home: { cx, cy, key }, aggro: 0 };
-  enemies.push(e); guardActive.set(key, e);
+              s: t.s * (gn.aff === 0 ? 1.25 : 1), d: t.d * dm, dm, c: t.c, cd: 5, fl: 0, oc: 0, lb: null, home: { cx, cy, key }, aggro: 0,
+              gn, eno: mem ? mem.eno : 0, ph: mem ? mem.ph : 0 };
+  setKits(e); enemies.push(e); guardActive.set(key, e);
 }
 function guardianTick(dt) {
   if (!GUARD_ON) return;
@@ -2173,73 +2194,106 @@ function guardianTick(dt) {
     const e = enemies[i]; if (!e.guardian) continue;
     let near = false;
     for (const p of players) if (p.hp > 0 && !p.afk && Math.hypot(p.x - e.x, p.y - e.y) < 2600) { near = true; break; }
-    if (!near) { guardMem.set(e.home.key, { hp: e.hp, mh: e.mh, x: e.x, y: e.y }); guardActive.delete(e.home.key); enemies.splice(i, 1); }
+    if (!near) { guardMem.set(e.home.key, { hp: e.hp, mh: e.mh, x: e.x, y: e.y, gn: e.gn, eno: e.eno, ph: e.ph }); guardActive.delete(e.home.key); enemies.splice(i, 1); }
   }
 }
-function hurtIn(x, y, r, dmg, iv) { for (const p of players) if (p.hp > 0 && !p.afk && p.iv <= 0 && Math.hypot(p.x - x, p.y - y) < r + p.r) { p.hp -= dmg; p.iv = iv; } }
+const gTargets = () => bot && !bot.down ? players.concat([bot]) : players;       // the bot takes hazard damage and draws guardian aggro too
+function hurtIn(x, y, r, dmg, iv) { for (const p of gTargets()) if (p.hp > 0 && !p.afk && p.iv <= 0 && Math.hypot(p.x - x, p.y - y) < r + p.r) { p.hp -= dmg; p.iv = iv; } }
+function addHazard(h) { if (hazards.length < 24) hazards.push(h); }              // keeps snapshots small however many powers are stacked
 function updateHazards(dt) {
+  if (!hazards.length) return;
+  const vs = gTargets();
   for (let i = hazards.length - 1; i >= 0; i--) {
     const h = hazards[i]; h.age += dt;
     if (h.kind === 0 && !h.done && h.age >= h.delay) { h.done = true; hurtIn(h.x, h.y, h.r, h.dmg, 0.4); rings.push({ x: h.x, y: h.y, r: 0, m: h.r }); }          // meteor
-    else if (h.kind === 1 && h.age > 0) { for (const p of players) if (p.hp > 0 && !p.afk && Math.hypot(p.x - h.x, p.y - h.y) < h.r + p.r) p.hp -= h.dmg * dt; }   // poison cloud
+    else if (h.kind === 1 && h.age > 0) { for (const p of vs) if (p.hp > 0 && !p.afk && Math.hypot(p.x - h.x, p.y - h.y) < h.r + p.r) p.hp -= h.dmg * dt; }   // poison cloud
     else if (h.kind === 2 && h.age >= h.delay && h.age < h.delay + 0.8) {                                                                                            // gravity pull
-      for (const p of players) { if (p.hp <= 0 || p.afk) continue; const dx = h.x - p.x, dy = h.y - p.y, d = Math.hypot(dx, dy); if (d < h.r && d > 12) { p.x += dx / d * 240 * dt; p.y += dy / d * 240 * dt; pushOut(p); } }
+      for (const p of vs) { if (p.hp <= 0 || p.afk) continue; const dx = h.x - p.x, dy = h.y - p.y, d = Math.hypot(dx, dy); if (d < h.r && d > 12) { p.x += dx / d * 240 * dt; p.y += dy / d * 240 * dt; pushOut(p); } }
     }
     if (h.kind === 2 && !h.burst && h.age >= h.delay + 0.8) { h.burst = true; for (let j = 0; j < 14; j++) fire({ x: h.x, y: h.y, dm: h.dm }, j * 0.449, 150, 10); }
     if (h.age >= h.life) hazards.splice(i, 1);
   }
 }
+/* Each guardian type's powers live in a kit that any guardian can borrow (x.pw is 1 for its own kit, 0.7 for borrowed ones).
+   A kit returns true while it is telegraphing or dashing, which pauses the other kits and normal movement. */
+const GKIT = [
+  function (e, k, t, x) {                                          // Prism Warden: prism bursts, telegraphed dash, drone summons
+    if (k.dash > 0) { k.dash -= x.dt; moveToward(e, k.dx, k.dy, 520, x.dt); return true; }
+    if (k.w > 0) { k.w -= x.dt; e.warn = 1; if (k.w <= 0) { k.dash = 0.45; k.dx = t.x + (t.x - e.x) * 0.3; k.dy = t.y + (t.y - e.y) * 0.3; e.warn = 0; } return true; }
+    if ((k.a -= x.dt) <= 0) { k.a = 4.2 * x.cs / x.pw; k.burst = 3; k.bt = 0; k.ang = grng() * 6.283; }
+    if (k.burst > 0 && (k.bt -= x.dt) <= 0) { k.bt = 0.3; k.burst--; const n = 8 + 2 * (x.T >> 1); for (let j = 0; j < n; j++) fire(e, k.ang + j * 6.283 / n + k.burst * 0.39, 170, 9); }
+    if ((k.b -= x.dt) <= 0) { k.b = 7 * x.cs / x.pw; k.w = 0.8; }
+    if (e.hp < e.mh * 0.6 && (k.c -= x.dt) <= 0) { k.c = 12 / x.pw; const n = 4 + (x.T >> 1); for (let j = 0; j < n; j++) enemies.push(makeEnemy(1, e.x + (j - (n - 1) / 2) * 40, e.y, ENEMY[1].hp * TUNE.hpMult(time))); }
+    return false;
+  },
+  function (e, k, t, x) {                                          // Cinder Tyrant: meteor rain, lava rings
+    if ((k.a -= x.dt) <= 0) { k.a = 5 * x.cs / x.pw; const n = 3 + (x.T >> 1); for (let j = 0; j < n; j++) addHazard({ kind: 0, x: t.x + (grng() - 0.5) * 220, y: t.y + (grng() - 0.5) * 220, r: 72, age: 0, delay: 1.1, life: 1.6, dmg: 34 * e.dm, dm: e.dm }); }
+    if ((k.b -= x.dt) <= 0) { k.b = 6.5 * x.cs / x.pw; const n = 16 + 2 * (x.T >> 1); for (let j = 0; j < n; j++) fire(e, j * 6.283 / n + k.ang, 120, 11); k.ang += 0.2; }
+    return false;
+  },
+  function (e, k, t, x) {                                          // Bloom Mother: spore fans, splitter spawns, poison clouds
+    if ((k.a -= x.dt) <= 0) { k.a = 3.5 * x.cs / x.pw; const a0 = angleTo(e, t), w = Math.min(5, 3 + (x.T >> 1)); for (let j = -w; j <= w; j++) fire(e, a0 + j * 0.16, 130, 8); }
+    if ((k.b -= x.dt) <= 0) { k.b = 9 / x.pw; const n = 2 + (x.T >> 2); for (let j = 0; j < n; j++) enemies.push(makeEnemy(4, e.x + (j - (n - 1) / 2) * 80, e.y, ENEMY[4].hp * TUNE.hpMult(time))); }
+    if ((k.c -= x.dt) <= 0) { k.c = 8 / x.pw; addHazard({ kind: 1, x: e.x, y: e.y, r: 115 + 6 * x.T, age: 0, delay: 0, life: 6, dmg: 12 * e.dm, dm: e.dm }); }
+    return false;
+  },
+  function (e, k, t, x) {                                          // Void Sovereign: blink strikes, gravity pull, spiral at half HP
+    if (k.w > 0) { k.w -= x.dt; e.warn = 1; if (k.w <= 0) { e.x = t.x + Math.cos(k.ang) * 170; e.y = t.y + Math.sin(k.ang) * 170; e.warn = 0; const n = 12 + x.T; for (let j = 0; j < n; j++) fire(e, j * 6.283 / n, 150, 10); } return true; }
+    if ((k.a -= x.dt) <= 0) { k.a = 6 * x.cs / x.pw; k.w = 0.7; k.ang = grng() * 6.283; }
+    if ((k.b -= x.dt) <= 0) { k.b = 8.5 / x.pw; addHazard({ kind: 2, x: e.x, y: e.y, r: 430, age: 0, delay: 1.2, life: 2.1, dmg: 0, dm: e.dm }); }
+    if (e.hp < e.mh * 0.5 && (k.bt -= x.dt) <= 0) { k.bt = 0.28 / x.pw; k.dx += 0.5; fire(e, k.dx, 140, 8); }
+    return false;
+  }
+];
+function mutateBurst(e) {                                          // phase change: the guardian visibly mutates
+  netToast(ENEMY[e.k].name + ' mutates!');
+  for (let j = 0; j < 12; j++) fire(e, j * 0.5236, 140, 9);
+}
 function guardAI(e, dt) {
-  const type = e.k - 8, c = e.home, x0 = c.cx * CELL, y0 = c.cy * CELL;
+  const own = e.k - 8, gn = e.gn, c = e.home, x0 = c.cx * CELL, y0 = c.cy * CELL;
   let tgt = null, bd = Infinity;
-  for (const p of players) {
+  for (const p of gTargets()) {
     if (p.hp <= 0 || p.afk) continue;
     const d = Math.hypot(p.x - e.x, p.y - e.y), inside = p.x >= x0 && p.x < x0 + CELL && p.y >= y0 && p.y < y0 + CELL;
     if ((inside || d < 450) && d < bd) { bd = d; tgt = p; }
   }
+  const was = e.aggro > 0;
   e.aggro = tgt ? 8 : Math.max(0, (e.aggro || 0) - dt);
   if (!tgt && !e.aggro) {                                          // roam inside the home cell until someone shows up
     e.hp = Math.min(e.mh, e.hp + e.mh * 0.02 * dt); e.warn = 0;
     if (!e.wp || (e.wt -= dt) <= 0 || Math.hypot(e.wp.x - e.x, e.wp.y - e.y) < 40) { e.wp = { x: x0 + 250 + grng() * (CELL - 500), y: y0 + 250 + grng() * (CELL - 500) }; e.wt = 6; }
     moveToward(e, e.wp.x, e.wp.y, e.s * 0.45, dt); return;
   }
-  const t = tgt || nearestPlayer(e.x, e.y), enr = e.hp < e.mh * 0.4 ? 1.3 : 1, dist = Math.hypot(t.x - e.x, t.y - e.y);
-  const st = e.st || (e.st = { a: 3, b: 6, c: 9, w: 0, burst: 0, bt: 0, dash: 0, ang: 0, dx: 0, dy: 0 });
-  if (type === 0) {                                                // Prism Warden: prism bursts, telegraphed dash, summons drones
-    if (st.dash > 0) { st.dash -= dt; moveToward(e, st.dx, st.dy, 520, dt); e.warn = 0; return; }
-    if (st.w > 0) { st.w -= dt; e.warn = 1; if (st.w <= 0) { st.dash = 0.45; st.dx = t.x + (t.x - e.x) * 0.3; st.dy = t.y + (t.y - e.y) * 0.3; e.warn = 0; } return; }
-    if (dist > 140) moveToward(e, t.x, t.y, e.s * enr, dt);
-    if ((st.a -= dt) <= 0) { st.a = 4.2 / enr; st.burst = 3; st.bt = 0; st.ang = grng() * 6.283; }
-    if (st.burst > 0 && (st.bt -= dt) <= 0) { st.bt = 0.3; st.burst--; for (let j = 0; j < 8; j++) fire(e, st.ang + j * 0.785 + st.burst * 0.39, 170, 9); }
-    if ((st.b -= dt) <= 0) { st.b = 7 / enr; st.w = 0.8; }
-    if (e.hp < e.mh * 0.6 && (st.c -= dt) <= 0) { st.c = 12; for (let j = 0; j < 4; j++) enemies.push(makeEnemy(1, e.x + (j - 1.5) * 40, e.y, ENEMY[1].hp * TUNE.hpMult(time))); }
-  } else if (type === 1) {                                         // Cinder Tyrant: meteor rain, lava rings, enrages
-    if (dist > 160) moveToward(e, t.x, t.y, e.s * enr, dt);
-    if ((st.a -= dt) <= 0) { st.a = 5 / enr; for (let j = 0; j < 3; j++) hazards.push({ kind: 0, x: t.x + (grng() - 0.5) * 220, y: t.y + (grng() - 0.5) * 220, r: 72, age: 0, delay: 1.1, life: 1.6, dmg: 34 * e.dm, dm: e.dm }); }
-    if ((st.b -= dt) <= 0) { st.b = 6.5; for (let j = 0; j < 16; j++) fire(e, j * 0.3927 + st.ang, 120, 11); st.ang += 0.2; }
-  } else if (type === 2) {                                         // Bloom Mother: spore fans, splitter spawns, poison clouds
-    if (dist > 220) moveToward(e, t.x, t.y, e.s, dt);
-    if ((st.a -= dt) <= 0) { st.a = 3.5; const a0 = angleTo(e, t); for (let j = -3; j <= 3; j++) fire(e, a0 + j * 0.16, 130, 8); }
-    if ((st.b -= dt) <= 0) { st.b = 9; for (let j = 0; j < 2; j++) enemies.push(makeEnemy(4, e.x + (j ? 40 : -40), e.y, ENEMY[4].hp * TUNE.hpMult(time))); }
-    if ((st.c -= dt) <= 0) { st.c = 8; hazards.push({ kind: 1, x: e.x, y: e.y, r: 115, age: 0, delay: 0, life: 6, dmg: 12 * e.dm, dm: e.dm }); }
-  } else {                                                         // Void Sovereign: blink strikes, gravity pulse, spiral at half HP
-    if (st.w > 0) { st.w -= dt; e.warn = 1; if (st.w <= 0) { e.x = t.x + Math.cos(st.ang) * 170; e.y = t.y + Math.sin(st.ang) * 170; e.warn = 0; for (let j = 0; j < 12; j++) fire(e, j * 0.5236, 150, 10); } return; }
-    if (dist > 200) moveToward(e, t.x, t.y, e.s * enr, dt);
-    if ((st.a -= dt) <= 0) { st.a = 6; st.w = 0.7; st.ang = grng() * 6.283; }
-    if ((st.b -= dt) <= 0) { st.b = 8.5; hazards.push({ kind: 2, x: e.x, y: e.y, r: 430, age: 0, delay: 1.2, life: 2.1, dmg: 0, dm: e.dm }); }
-    if (e.hp < e.mh * 0.5 && (st.bt -= dt) <= 0) { st.bt = 0.28; st.dx += 0.5; fire(e, st.dx, 140, 8); }
+  if (!was) {                                                      // a new encounter: stronger (tier +1) and the borrowed powers rotate
+    e.eno = (e.eno | 0) + 1; e.st = null; e.ph = e.hp < e.mh * 0.33 ? 2 : e.hp < e.mh * 0.66 ? 1 : 0; setKits(e);
   }
+  const ph = e.hp < e.mh * 0.33 ? 2 : e.hp < e.mh * 0.66 ? 1 : 0;
+  if (ph > e.ph) { e.ph = ph; setKits(e); mutateBurst(e); }       // phase change: unlock the next borrowed power
+  const t = tgt || nearestPlayer(e.x, e.y), enr = e.hp < e.mh * 0.4 ? 1.3 : 1, T = gTier(e);
+  const x = { dt, dist: Math.hypot(t.x - e.x, t.y - e.y), T, pw: 1,
+              cs: Math.max(0.5, 1 - 0.06 * T) * (gn.aff === 0 ? 0.85 : 1) * (e.ph >= 2 ? 0.9 : 1) / enr };
+  const st = e.st || (e.st = {});
+  e.warn = 0;
+  let busy = false;
+  for (let i = 0; i < e.kits.length && !busy; i++) {
+    const ty = e.kits[i], k = st[ty] || (st[ty] = { a: 3 + i * 2, b: 6 + i * 2, c: 9 + i * 3, w: 0, burst: 0, bt: 0, dash: 0, ang: 0, dx: 0, dy: 0 });
+    x.pw = i ? 0.7 : 1; busy = GKIT[ty](e, k, t, x);
+  }
+  if (gn.aff === 3) e.hp = Math.min(e.mh, e.hp + e.mh * 0.01 * dt);   // Regenerating
+  if (!busy && x.dist > GKEEP[own]) moveToward(e, t.x, t.y, e.s * enr, dt);
 }
 AI.guard = (e, dt) => guardAI(e, dt);
 DEATH.guardian = e => guardianKilled(e);
 function guardianKilled(e) {
-  const type = e.k - 8, ring = Math.max(Math.abs(e.home.cx), Math.abs(e.home.cy));
+  const type = e.k - 8, ring = Math.max(Math.abs(e.home.cx), Math.abs(e.home.cy)), T = gTier(e), twin = T >= 3 && e.kits.length > 1;
   guardSlain.add(e.home.key); guardActive.delete(e.home.key); guardMem.delete(e.home.key);
-  S.gk |= 1 << type; S.bosses++; S.shards += 12 + 3 * ring;
+  S.gk |= 1 << type; S.bosses++; S.shards += 12 + 3 * ring + 4 * T;
   relics.push({ x: e.x, y: e.y, type });
-  for (let i = 0; i < 12; i++) gems.push({ x: e.x + (grng() - 0.5) * 120, y: e.y + (grng() - 0.5) * 120, v: 3 });
+  if (twin) relics.push({ x: e.x + 46, y: e.y + 20, type: e.kits[1] });   // a well-evolved guardian also leaves a relic of a power it borrowed
+  if (e.gn.aff === 2) for (let j = 0; j < 16; j++) fire(e, j * 0.3927, 160, 10);   // Volatile: dies in a burst
+  for (let i = 0; i < 12 + 2 * T; i++) gems.push({ x: e.x + (grng() - 0.5) * 120, y: e.y + (grng() - 0.5) * 120, v: 3 });
   for (let i = 0; i < 2; i++) packs.push({ x: e.x + (i ? 50 : -50), y: e.y, life: PACK_LIFE * 2 });
-  netToast(ENEMY[e.k].name + ' defeated! Collect its relic.');
+  netToast(ENEMY[e.k].name + ' defeated! Collect its relic' + (twin ? 's' : '') + '.');
 }
 function relicTick() {
   for (let i = relics.length - 1; i >= 0; i--) {
@@ -2249,9 +2303,24 @@ function relicTick() {
 }
 function grantRelic(p, type) {
   const def = RELIC[type], maxed = p.relics.filter(t => t === type).length >= 3;
-  if (maxed) { xp += xpNext * 0.5; p.hp = p.mhp; } else { p.relics.push(type); def.apply(p); }
+  if (maxed) { xp += xpNext * 0.5; p.hp = p.mhp; if (bot && !bot.down && p === player) bot.hp = bot.mhp; } else { p.relics.push(type); def.apply(p); }
   const msg = maxed ? 'Relic power maxed: bonus XP and a full heal' : def.d, name = def.n;
-  if (p === player) netToast('★ ' + name + ': ' + msg); else if (net && net.tr && p.netId) net.tr.send(p.netId, { t: 'relic', n: name, d: msg });
+  if (p === player) netToast('\u2605 ' + name + ': ' + msg); else if (net && net.tr && p.netId) net.tr.send(p.netId, { t: 'relic', n: name, d: msg });
+}
+/* The bot reads the local player's damage/rate/speed/pickup stats, so those upgrades already reach it. Its HP did not: it now gains
+   every max-HP point the player gains (Vitality, Bloom Heart) and half of the player's regeneration. */
+function botSync(dt) {
+  const b = bot; if (!b || !player) return;
+  if (b.lm === undefined) b.lm = player.mhp;
+  if (player.mhp > b.lm) { const d = player.mhp - b.lm; b.mhp += d; if (!b.down) b.hp = Math.min(b.mhp, b.hp + d); b.lm = player.mhp; }
+  if (!b.down && player.regen > 0) b.hp = Math.min(b.mhp, b.hp + player.regen * 0.5 * dt);
+}
+/* A downed bot gets back up on its own after REVIVE_T seconds (standing next to it still revives it sooner).
+   Co-op players do the same from reviveTick when their 45 s bleed timer runs out. */
+function autoRevive(dt) {
+  const b = bot; if (!b) return;
+  if (!b.down) b.adn = 0;
+  else if ((b.adn = (b.adn || 0) + dt) >= REVIVE_T) { b.down = 0; b.hp = b.mhp / 2; b.rv = 0; b.iv = 2; b.adn = 0; if (typeof playTone === 'function') playTone(900, 0.2, 'sine', 0.06); netToast('Bot is back up'); }
 }
 /* ----- guardian drawing: hazards, relic pickups, edge markers toward guardians, and the fight's HP bar ----- */
 function edgeMark(sx, sy, col, text) {
@@ -2282,10 +2351,16 @@ function drawGuardianUI(ox, oy) {
   if (gd) {
     g.fillStyle = '#0009'; g.fillRect(W / 2 - 162, 12, 324, 14); g.fillStyle = gd.c; g.fillRect(W / 2 - 160, 14, 320 * Math.max(0, gd.hp / gd.mh), 10);
     g.fillStyle = '#fff'; g.textAlign = 'center'; g.font = '13px system-ui'; g.fillText(ENEMY[gd.k].name, W / 2, 42);
+    const tg = guardTags(gd); if (tg) { g.fillStyle = gd.c; g.font = '11px system-ui'; g.fillText(tg, W / 2, 58); }
   }
   g.restore();
 }
 function guardMarks() { return (net && net.role === 'client' ? clientGuards : guardianCellsNear(player)).slice(0, 3); }
+function guardTags(e) {                                            // "Swift · Molten · Blighted": affix + borrowed powers unlocked so far
+  const mx = e.mx | 0, a = (mx & 7) - 1, out = []; if (a >= 0) out.push(AFFIX[a]);
+  for (let t = 0; t < 4; t++) if ((mx >> (5 + t)) & 1) out.push(TOUCH[t]);
+  return out.join(' \u00b7 ');
+}
 
 /* ----- teammate indicators: name tags on screen, edge arrows (with distance) when they are off screen ----- */
 function drawMates(ox, oy) {
