@@ -389,32 +389,205 @@ const TUNE = {
   bossShards:  n  => 10 + 2 * n
 };
 
-const UPGRADES = [
-  { id: 'bolt', n: 'Plasma Bolt', d: 'Auto-fires at nearest foe' },
-  { id: 'orb',  n: 'Orbit Blades', d: 'Blades circle you' },
-  { id: 'nova', n: 'Pulse Nova', d: 'Periodic shockwave' },
-  { id: 'arc',   n: 'Chain Lightning', d: 'Strikes a foe, then jumps between enemies' },
-  { id: 'mine',  n: 'Proximity Mines', d: 'Drops mines that detonate near enemies' },
-  { id: 'shard', n: 'Scatter Shards', d: 'Short-range cone of fast shards' },
-  { id: 'spd',  n: 'Swift Boots', d: '+12% speed', p: 1 },
-  { id: 'dmg',  n: 'Overcharge', d: '+20% damage', p: 1 },
-  { id: 'rate', n: 'Rapid Fire', d: '+15% fire rate', p: 1 },
-  { id: 'hp',   n: 'Vitality', d: '+25 max HP & heal', p: 1 },
-  { id: 'mag',  n: 'Magnet', d: '+40% pickup range', p: 1 },
-  { id: 'area',  n: 'Wide Field', d: '+15% area (nova, blades, mines, chains)', p: 1 },
-  { id: 'regen', n: 'Nanites', d: '+0.4 HP per second', p: 1 }
-];
-const EVO = {   // max-level weapon + 2 stacks of its passive -> an evolution is offered (and shown first) at level-up
-  bolt:  { p: 'dmg',  id: 'evo_bolt',  n: 'Railgun',        d: 'Bolt: +2 shots, pierces everything' },
-  orb:   { p: 'spd',  id: 'evo_orb',   n: 'Halo',           d: 'Blades: +4 blades, wider orbit' },
-  nova:  { p: 'area', id: 'evo_nova',  n: 'Supernova',      d: 'Nova: +50% radius, 40% faster' },
-  arc:   { p: 'rate', id: 'evo_arc',   n: 'Tesla Storm',    d: 'Lightning: double chains, 40% faster' },
-  mine:  { p: 'mag',  id: 'evo_mine',  n: 'Cluster Mines',  d: 'Mines: drop 3 at once, bigger blast' },
-  shard: { p: 'hp',   id: 'evo_shard', n: 'Shrapnel Storm', d: 'Shards: double pellets, longer range' }
+/* ========== Weapons & upgrades (data-driven) ==========
+   A weapon is one entry in WEAPONS: picker text, evolution, HUD label, starting cooldown state and an update(p, dt) that fires it.
+   Passives are entries in PASSIVES. The picker, evolutions, level cap, HUD line, level-up pool and per-player state are generated
+   from these tables, so adding a weapon is one entry (plus a draw hook if it has a visual) and adding a passive is one entry.
+   phase 1 weapons run early in tick (before enemies move), phase 2 weapons after; `always` runs even at level 0. */
+const WEAPON_MAX = 6, MAX_WEAPONS = 4;   // level cap per weapon; weapon slots: forces build decisions
+const WEAPONS = {
+  bolt: {
+    n: 'Plasma Bolt', d: 'Auto-fires at nearest foe', start: 1, st: { cd: 0 }, hud: 'Bolt', hudAlways: 1, phase: 1, always: 1,
+    evo: { p: 'dmg', n: 'Railgun', d: 'Bolt: +2 shots, pierces everything' },
+    update(p, dt) {
+      p.cd -= dt;
+      const boltLv = p.w.bolt;
+      if (boltLv && p.cd <= 0) {
+        let best = null, bestD = 1e9;
+        for (let i = 0; i < enemies.length; i++) {
+          const e = enemies[i], d = dist2(e.x, e.y, p.x, p.y);
+          if (d < bestD) { bestD = d; best = e; }
+        }
+        if (best && bestD < 640000) {
+          const evB = p.evo.bolt, n = 1 + (boltLv >= 3) + (boltLv >= 5) + (evB ? 2 : 0) + (p.ex.bolt | 0);
+          const a = Math.atan2(best.y - p.y, best.x - p.x);
+          for (let i = 0; i < n; i++) {
+            const aa = a + (i - (n - 1) / 2) * 0.14;
+            bullets.push({
+              x: p.x, y: p.y,
+              vx: Math.cos(aa) * 520, vy: Math.sin(aa) * 520,
+              d: 14 * p.dmg * (1 + 0.18 * (boltLv - 1)),
+              p: evB ? 99 : boltLv >= 4 ? 2 : 0, l: 1.2
+            });
+          }
+          p.cd = Math.max(0.12, 0.5 / p.rate - 0.04 * boltLv);
+          playTone(520, 0.04, 'square', 0.015);
+        } else p.cd = 0.1;
+      }
+    }
+  },
+  orb: {
+    n: 'Orbit Blades', d: 'Blades circle you', hud: 'Blades', hudAlways: 1,
+    evo: { p: 'spd', n: 'Halo', d: 'Blades: +4 blades, wider orbit' },
+    update(p, dt) {
+      const n = orbCount(p), R = orbRadius(p);
+      for (let i = 0; i < n; i++) {
+        const a = p.ang + i * 6.283 / n;
+        const x = p.x + Math.cos(a) * R, y = p.y + Math.sin(a) * R;
+        const hits = nearEnemies(x, y, 10);
+        for (let h = 0; h < hits.length; h++) {
+          const e = hits[h];
+          if (e.oc > 0) continue;
+          damage(e, 12 * p.dmg * (1 + 0.15 * p.w.orb));
+          e.oc = 0.35;
+        }
+      }
+    }
+  },
+  nova: {
+    n: 'Pulse Nova', d: 'Periodic shockwave', st: { ncd: 2 }, hud: 'Nova', hudAlways: 1,
+    evo: { p: 'area', n: 'Supernova', d: 'Nova: +50% radius, 40% faster' },
+    update(p, dt) {
+      p.ncd -= dt;
+      if (p.ncd <= 0) {
+        const m = (90 + 25 * p.w.nova) * p.area * (p.evo.nova ? 1.5 : 1);
+        rings.push({ x: p.x, y: p.y, r: 0, m });
+        for (let i = 0; i < enemies.length; i++) {
+          const e = enemies[i];
+          if (Math.hypot(e.x - p.x, e.y - p.y) < m + e.r)
+            damage(e, 40 * p.dmg * (1 + 0.15 * p.w.nova));
+        }
+        p.ncd = Math.max(1.5, 4 - 0.35 * p.w.nova) * (p.evo.nova ? 0.6 : 1);
+        playTone(90, 0.25, 'sine', 0.08);
+      }
+    }
+  },
+  arc: {                                              // Chain Lightning
+    n: 'Chain Lightning', d: 'Strikes a foe, then jumps between enemies', st: { acd: 1 }, hud: 'Arc',
+    evo: { p: 'rate', n: 'Tesla Storm', d: 'Lightning: double chains, 40% faster' },
+    update(p, dt) {
+      const lv = p.w.arc, ev = p.evo.arc;
+      if ((p.acd -= dt) <= 0) {
+        let best = null, bd = 160000;
+        for (let i = 0; i < enemies.length; i++) {
+          const e = enemies[i], d = dist2(e.x, e.y, p.x, p.y);
+          if (e.hp > 0 && d < bd) { bd = d; best = e; }
+        }
+        if (best) {
+          const links = 2 + lv + (ev ? lv : 0), dmg = 12 * p.dmg * (1 + 0.18 * (lv - 1));
+          const hit = new Set();                             // one small allocation per cast
+          let cur = best, px = p.x, py = p.y;
+          for (let n = 0; n < links && cur; n++) {
+            damage(cur, dmg); hit.add(cur);
+            arcs.push({ x1: px, y1: py, x2: cur.x, y2: cur.y, l: 0.18 });
+            px = cur.x; py = cur.y;
+            let nx = null, nd = 22500 * p.area;         // 150 px chain range
+            for (let i = 0; i < enemies.length; i++) {
+              const e = enemies[i];
+              if (e.hp <= 0 || hit.has(e)) continue;
+              const d = dist2(e.x, e.y, px, py);
+              if (d < nd) { nd = d; nx = e; }
+            }
+            cur = nx;
+          }
+          playTone(900, 0.06, 'sawtooth', 0.02);
+        }
+        p.acd = Math.max(0.35, 1.5 / p.rate - 0.1 * lv) * (ev ? 0.6 : 1);
+      }
+    }
+  },
+  mine: {                                             // Proximity Mines
+    n: 'Proximity Mines', d: 'Drops mines that detonate near enemies', st: { mcd: 1 }, hud: 'Mines',
+    evo: { p: 'mag', n: 'Cluster Mines', d: 'Mines: drop 3 at once, bigger blast' },
+    update(p, dt) {
+      const lv = p.w.mine, ev = p.evo.mine;
+      if ((p.mcd -= dt) <= 0) {
+        for (let k = 0; k < (ev ? 3 : 1); k++)
+          mines.push({ x: p.x + (k ? (rng() - 0.5) * 120 : 0), y: p.y + (k ? (rng() - 0.5) * 120 : 0), t: 0.6, l: 10, o: p });
+        p.mcd = Math.max(1.2, 3 / p.rate - 0.2 * lv);
+      }
+      const rad = (60 + 8 * lv) * p.area * (ev ? 1.3 : 1);
+      for (let i = mines.length - 1; i >= 0; i--) {
+        const m = mines[i];
+        if (m.o !== p) continue;            // every owner updates only its own mines
+        m.t -= dt; m.l -= dt;
+        const boom = m.l <= 0 || (m.t <= 0 && nearEnemies(m.x, m.y, 26).length > 0);
+        if (!boom) continue;
+        rings.push({ x: m.x, y: m.y, r: 0, m: rad });
+        for (let j = 0; j < enemies.length; j++) {
+          const e = enemies[j];
+          if (Math.hypot(e.x - m.x, e.y - m.y) < rad + e.r) damage(e, 35 * p.dmg * (1 + 0.2 * (lv - 1)));
+        }
+        playTone(120, 0.15, 'square', 0.05);
+        mines[i] = mines[mines.length - 1]; mines.pop();
+      }
+    }
+  },
+  shard: {                                            // Scatter Shards
+    n: 'Scatter Shards', d: 'Short-range cone of fast shards', st: { scd: 1 }, hud: 'Shards',
+    evo: { p: 'hp', n: 'Shrapnel Storm', d: 'Shards: double pellets, longer range' },
+    update(p, dt) {
+      const lv = p.w.shard, ev = p.evo.shard;
+      if ((p.scd -= dt) <= 0) {
+        let best = null, bd = 140000;
+        for (let i = 0; i < enemies.length; i++) {
+          const e = enemies[i], d = dist2(e.x, e.y, p.x, p.y);
+          if (d < bd) { bd = d; best = e; }
+        }
+        if (best) {
+          const a = Math.atan2(best.y - p.y, best.x - p.x), n = (3 + lv) * (ev ? 2 : 1);
+          for (let i = 0; i < n; i++) {
+            const aa = a + (i / (n - 1) - 0.5) * (0.9 + 0.05 * n);
+            bullets.push({ x: p.x, y: p.y, vx: Math.cos(aa) * 600, vy: Math.sin(aa) * 600,
+                           d: 7 * p.dmg * (1 + 0.15 * (lv - 1)), p: 0, l: ev ? 0.55 : 0.4 });
+          }
+          playTone(300, 0.05, 'triangle', 0.02);
+        }
+        p.scd = Math.max(0.5, 1.3 / p.rate - 0.08 * lv);
+      }
+    }
+  }
 };
-const MAX_WEAPONS = 4;   // weapon slots: forces build decisions
+const PASSIVES = {                                    // picked at level-up; p.pc[id] counts stacks (evolutions need 2 of their passive)
+  spd:   { n: 'Swift Boots', d: '+12% speed',                              apply: p => { p.spd *= 1 + 0.12 * TUNE.passiveGain(p.pc.spd); } },
+  dmg:   { n: 'Overcharge',  d: '+20% damage',                             apply: p => { p.dmg *= 1 + 0.2 * TUNE.passiveGain(p.pc.dmg); } },
+  rate:  { n: 'Rapid Fire',  d: '+15% fire rate',                          apply: p => { p.rate *= 1 + 0.15 * TUNE.passiveGain(p.pc.rate); } },
+  hp:    { n: 'Vitality',    d: '+25 max HP & heal',                       apply: p => { p.mhp += 25; p.hp = Math.min(p.mhp, p.hp + 25); } },
+  mag:   { n: 'Magnet',      d: '+40% pickup range',                       apply: p => { p.mag *= 1 + 0.4 * TUNE.passiveGain(p.pc.mag); } },
+  area:  { n: 'Wide Field',  d: '+15% area (nova, blades, mines, chains)', apply: p => { p.area *= 1 + 0.15 * TUNE.passiveGain(p.pc.area); } },
+  regen: { n: 'Nanites',     d: '+0.4 HP per second',                      apply: p => { p.regen += 0.4; } }
+};
+const UPGRADES = [                                    // generated: weapons first, then passives (the order the level-up pool draws from)
+  ...Object.keys(WEAPONS).map(id => ({ id, n: WEAPONS[id].n, d: WEAPONS[id].d })),
+  ...Object.keys(PASSIVES).map(id => ({ id, n: PASSIVES[id].n, d: PASSIVES[id].d, p: 1 }))
+];
+const EVO = {};   // max-level weapon + 2 stacks of its passive -> an evolution is offered (and shown first) at level-up
+for (const k in WEAPONS) if (WEAPONS[k].evo) EVO[k] = { p: WEAPONS[k].evo.p, id: 'evo_' + k, n: WEAPONS[k].evo.n, d: WEAPONS[k].evo.d };
+const newWeaponLevels = () => { const w = {}; for (const id in WEAPONS) w[id] = WEAPONS[id].start | 0; return w; };
+const newWeaponState = () => { const s = {}; for (const id in WEAPONS) Object.assign(s, WEAPONS[id].st); return s; };
 const orbCount = (p = player) => 1 + p.w.orb + (p.evo.orb ? 4 : 0);
 const orbRadius = (p = player) => 70 * p.area * (p.evo.orb ? 1.35 : 1);
+function runWeapons(p, dt, phase) {
+  if (phase === 2) p.ang += 3 * dt;
+  for (const id in WEAPONS) { const w = WEAPONS[id]; if ((w.phase || 2) === phase && (p.w[id] || w.always)) w.update(p, dt); }
+}
+const weaponHud = p => Object.keys(WEAPONS).filter(id => WEAPONS[id].hudAlways || p.w[id]).map(id => WEAPONS[id].hud + ' ' + p.w[id]).join('  ');
+function upgradePool(p) {                             // what a level-up may offer: passives, owned weapons below the cap, new weapons while slots are free
+  const owned = Object.keys(p.w).filter(k => p.w[k] > 0).length;
+  return UPGRADES.filter(u => u.p || (p.w[u.id] < WEAPON_MAX && (p.w[u.id] > 0 || owned < MAX_WEAPONS)));
+}
+function evoChoices(p) { return Object.keys(EVO).filter(k => p.w[k] >= WEAPON_MAX && !p.evo[k] && (p.pc[EVO[k].p] || 0) >= 2).map(k => ({ ...EVO[k], evo: 1 })); }
+function rollPicks(p) {                               // solo and co-op share this: a ready evolution first, then random picks
+  const pool = upgradePool(p), picks = evoChoices(p).slice(0, 1);
+  while (picks.length < 3 && pool.length) picks.push(pool.splice(rng() * pool.length | 0, 1)[0]);
+  return picks;
+}
+function applyUpgrade(p, id) {
+  if (id.startsWith('evo_')) { p.evo[id.slice(4)] = 1; return; }
+  const ps = PASSIVES[id];
+  if (ps) { p.pc[id] = (p.pc[id] || 0) + 1; ps.apply(p); }
+  else if (p.w[id] !== undefined) p.w[id]++;
+}
 const SHOP = [
   ['hp',  'Vitality +15 HP'],
   ['dmg', 'Power +8% damage'],
@@ -692,9 +865,9 @@ function makePlayer(idx, ch) {
     spd: 170 * (1 + 0.05 * u.spd),
     dmg: 1 + 0.08 * u.dmg, rate: 1,
     mag: 70 * (1 + 0.15 * u.mag),
-    w: { bolt: 1, orb: 0, nova: 0, arc: 0, mine: 0, shard: 0 },
-    pc: {}, evo: {}, ex: {}, relics: [], area: 1, regen: 0, acd: 1, mcd: 1, scd: 1,
-    cd: 0, ncd: 2, ang: 0, iv: 0
+    w: newWeaponLevels(),
+    pc: {}, evo: {}, ex: {}, relics: [], area: 1, regen: 0, ...newWeaponState(),
+    ang: 0, iv: 0
   };
   const c = CHAR[idx === 0 ? effChar() : clamp(ch | 0, 0, CHAR.length - 1)];      // character + mutator modifiers
   Object.assign(p.w, c.w); c.mod(p);
@@ -710,7 +883,7 @@ function start(sd) {
   chunks = new Map();
   runMut = /^D\d{4}-/.test(seed) ? dailyMask(seed) : S.mut;   // daily challenge uses fixed mutators
   lastSec = 0;
-  guardSlain.clear(); guardActive.clear(); guardMem.clear(); hazards = []; relics = []; gT = 0; grng = mulberry(hashStr(seed + 'guardrng'));
+  guardReset(); hazards = []; relics = []; gT = 0; grng = mulberry(hashStr(seed + 'guardrng'));
   players = [player = makePlayer(0)];   // players[0] is the local player
   enemies = []; bullets = []; eBullets = []; gems = []; packs = []; rings = []; arcs = []; mines = [];
   time = 0; kills = 0; level = 1; xp = 0; xpNext = 5;
@@ -799,13 +972,7 @@ function levelUp() {
   if (net && net.role === 'host') return coopLevelUp();      // co-op: everyone picks, nobody pauses
   level++; xp -= xpNext; xpNext = TUNE.xpNeed(level);
   player.mhp += 3; player.hp = Math.min(player.mhp, player.hp + player.mhp * 0.1);   // small heal + HP per level
-  const owned = Object.keys(player.w).filter(k => player.w[k] > 0).length;
-  const pool = UPGRADES.filter(u => u.p || (player.w[u.id] < 6 && (player.w[u.id] > 0 || owned < MAX_WEAPONS)));
-  const evos = Object.keys(EVO).filter(k => player.w[k] >= 6 && !player.evo[k] && (player.pc[EVO[k].p] || 0) >= 2)
-    .map(k => ({ ...EVO[k], evo: 1 }));
-  const picks = evos.slice(0, 1);
-  while (picks.length < 3 && pool.length)
-    picks.push(pool.splice(rng() * pool.length | 0, 1)[0]);
+  const picks = rollPicks(player);
   choices = picks;
   state = 'pick';
   playTone(880, 0.2, 'sine', 0.06);
@@ -814,20 +981,6 @@ function levelUp() {
       `<button onclick="pickUpgrade('${u.id}')">${i + 1}. ${u.n}${u.p ? '' : u.evo ? ' ★ EVOLUTION' : player.w[u.id] ? ' → Lv' + (player.w[u.id] + 1) : ' (NEW)'}
         <br><small>${u.d}</small></button>`
     ).join(''));
-}
-
-function applyUpgrade(p, id) {
-  const up = UPGRADES.find(u => u.id === id);
-  if (up && up.p) p.pc[id] = (p.pc[id] || 0) + 1;
-  if (id.startsWith('evo_')) p.evo[id.slice(4)] = 1;
-  else if (id === 'area') p.area *= 1 + 0.15 * TUNE.passiveGain(p.pc.area);
-  else if (id === 'regen') p.regen += 0.4;
-  if (p.w[id] !== undefined) p.w[id]++;
-  else if (id === 'spd') p.spd *= 1 + 0.12 * TUNE.passiveGain(p.pc.spd);
-  else if (id === 'dmg') p.dmg *= 1 + 0.2 * TUNE.passiveGain(p.pc.dmg);
-  else if (id === 'rate') p.rate *= 1 + 0.15 * TUNE.passiveGain(p.pc.rate);
-  else if (id === 'hp') { p.mhp += 25; p.hp = Math.min(p.mhp, p.hp + 25); }
-  else if (id === 'mag') p.mag *= 1 + 0.4 * TUNE.passiveGain(p.pc.mag);
 }
 
 function pickUpgrade(id) {
@@ -882,144 +1035,6 @@ function nearestTarget(e) {
   return bot && !bot.down && dist2(bot.x, bot.y, e.x, e.y) < dist2(p.x, p.y, e.x, e.y) ? bot : p;
 }
 
-function fireBolt(p, dt) {
-  p.cd -= dt;
-  const boltLv = p.w.bolt;
-  if (boltLv && p.cd <= 0) {
-    let best = null, bestD = 1e9;
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i], d = dist2(e.x, e.y, p.x, p.y);
-      if (d < bestD) { bestD = d; best = e; }
-    }
-    if (best && bestD < 640000) {
-      const evB = p.evo.bolt, n = 1 + (boltLv >= 3) + (boltLv >= 5) + (evB ? 2 : 0) + (p.ex.bolt | 0);
-      const a = Math.atan2(best.y - p.y, best.x - p.x);
-      for (let i = 0; i < n; i++) {
-        const aa = a + (i - (n - 1) / 2) * 0.14;
-        bullets.push({
-          x: p.x, y: p.y,
-          vx: Math.cos(aa) * 520, vy: Math.sin(aa) * 520,
-          d: 14 * p.dmg * (1 + 0.18 * (boltLv - 1)),
-          p: evB ? 99 : boltLv >= 4 ? 2 : 0, l: 1.2
-        });
-      }
-      p.cd = Math.max(0.12, 0.5 / p.rate - 0.04 * boltLv);
-      playTone(520, 0.04, 'square', 0.015);
-    } else p.cd = 0.1;
-  }
-
-}
-
-function updateWeapons(p, dt) {
-  p.ang += 3 * dt;
-  if (p.w.orb) {
-    const n = orbCount(p), R = orbRadius(p);
-    for (let i = 0; i < n; i++) {
-      const a = p.ang + i * 6.283 / n;
-      const x = p.x + Math.cos(a) * R, y = p.y + Math.sin(a) * R;
-      const hits = nearEnemies(x, y, 10);
-      for (let h = 0; h < hits.length; h++) {
-        const e = hits[h];
-        if (e.oc > 0) continue;
-        damage(e, 12 * p.dmg * (1 + 0.15 * p.w.orb));
-        e.oc = 0.35;
-      }
-    }
-  }
-
-  if (p.w.nova) {
-    p.ncd -= dt;
-    if (p.ncd <= 0) {
-      const m = (90 + 25 * p.w.nova) * p.area * (p.evo.nova ? 1.5 : 1);
-      rings.push({ x: p.x, y: p.y, r: 0, m });
-      for (let i = 0; i < enemies.length; i++) {
-        const e = enemies[i];
-        if (Math.hypot(e.x - p.x, e.y - p.y) < m + e.r)
-          damage(e, 40 * p.dmg * (1 + 0.15 * p.w.nova));
-      }
-      p.ncd = Math.max(1.5, 4 - 0.35 * p.w.nova) * (p.evo.nova ? 0.6 : 1);
-      playTone(90, 0.25, 'sine', 0.08);
-    }
-  }
-
-  if (p.w.arc) {                                      // Chain Lightning
-    const lv = p.w.arc, ev = p.evo.arc;
-    if ((p.acd -= dt) <= 0) {
-      let best = null, bd = 160000;
-      for (let i = 0; i < enemies.length; i++) {
-        const e = enemies[i], d = dist2(e.x, e.y, p.x, p.y);
-        if (e.hp > 0 && d < bd) { bd = d; best = e; }
-      }
-      if (best) {
-        const links = 2 + lv + (ev ? lv : 0), dmg = 12 * p.dmg * (1 + 0.18 * (lv - 1));
-        const hit = new Set();                             // one small allocation per cast
-        let cur = best, px = p.x, py = p.y;
-        for (let n = 0; n < links && cur; n++) {
-          damage(cur, dmg); hit.add(cur);
-          arcs.push({ x1: px, y1: py, x2: cur.x, y2: cur.y, l: 0.18 });
-          px = cur.x; py = cur.y;
-          let nx = null, nd = 22500 * p.area;         // 150 px chain range
-          for (let i = 0; i < enemies.length; i++) {
-            const e = enemies[i];
-            if (e.hp <= 0 || hit.has(e)) continue;
-            const d = dist2(e.x, e.y, px, py);
-            if (d < nd) { nd = d; nx = e; }
-          }
-          cur = nx;
-        }
-        playTone(900, 0.06, 'sawtooth', 0.02);
-      }
-      p.acd = Math.max(0.35, 1.5 / p.rate - 0.1 * lv) * (ev ? 0.6 : 1);
-    }
-  }
-
-  if (p.w.mine) {                                     // Proximity Mines
-    const lv = p.w.mine, ev = p.evo.mine;
-    if ((p.mcd -= dt) <= 0) {
-      for (let k = 0; k < (ev ? 3 : 1); k++)
-        mines.push({ x: p.x + (k ? (rng() - 0.5) * 120 : 0), y: p.y + (k ? (rng() - 0.5) * 120 : 0), t: 0.6, l: 10, o: p });
-      p.mcd = Math.max(1.2, 3 / p.rate - 0.2 * lv);
-    }
-    const rad = (60 + 8 * lv) * p.area * (ev ? 1.3 : 1);
-    for (let i = mines.length - 1; i >= 0; i--) {
-      const m = mines[i];
-      if (m.o !== p) continue;            // every owner updates only its own mines
-      m.t -= dt; m.l -= dt;
-      const boom = m.l <= 0 || (m.t <= 0 && nearEnemies(m.x, m.y, 26).length > 0);
-      if (!boom) continue;
-      rings.push({ x: m.x, y: m.y, r: 0, m: rad });
-      for (let j = 0; j < enemies.length; j++) {
-        const e = enemies[j];
-        if (Math.hypot(e.x - m.x, e.y - m.y) < rad + e.r) damage(e, 35 * p.dmg * (1 + 0.2 * (lv - 1)));
-      }
-      playTone(120, 0.15, 'square', 0.05);
-      mines[i] = mines[mines.length - 1]; mines.pop();
-    }
-  }
-
-  if (p.w.shard) {                                    // Scatter Shards
-    const lv = p.w.shard, ev = p.evo.shard;
-    if ((p.scd -= dt) <= 0) {
-      let best = null, bd = 140000;
-      for (let i = 0; i < enemies.length; i++) {
-        const e = enemies[i], d = dist2(e.x, e.y, p.x, p.y);
-        if (d < bd) { bd = d; best = e; }
-      }
-      if (best) {
-        const a = Math.atan2(best.y - p.y, best.x - p.x), n = (3 + lv) * (ev ? 2 : 1);
-        for (let i = 0; i < n; i++) {
-          const aa = a + (i / (n - 1) - 0.5) * (0.9 + 0.05 * n);
-          bullets.push({ x: p.x, y: p.y, vx: Math.cos(aa) * 600, vy: Math.sin(aa) * 600,
-                         d: 7 * p.dmg * (1 + 0.15 * (lv - 1)), p: 0, l: ev ? 0.55 : 0.4 });
-        }
-        playTone(300, 0.05, 'triangle', 0.02);
-      }
-      p.scd = Math.max(0.5, 1.3 / p.rate - 0.08 * lv);
-    }
-  }
-
-}
-
 function tick(dt) {
   time += dt; gcTimer += dt;
   if (net && net.role === 'host') netTick(dt);               // co-op: pick timeouts + snapshots
@@ -1063,7 +1078,7 @@ function tick(dt) {
   buildGrid();
 
   // Player weapons (each player fires independently)
-  for (const p of players) if (p.hp > 0) fireBolt(p, dt);
+  for (const p of players) if (p.hp > 0) runWeapons(p, dt, 1);
 
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
@@ -1081,7 +1096,7 @@ function tick(dt) {
     if (remove) { bullets[i] = bullets[bullets.length - 1]; bullets.pop(); }
   }
 
-  for (const p of players) if (p.hp > 0) updateWeapons(p, dt);
+  for (const p of players) if (p.hp > 0) runWeapons(p, dt, 2);
   for (let i = arcs.length - 1; i >= 0; i--) if ((arcs[i].l -= dt) <= 0) arcs.splice(i, 1);
 
   // Enemies
@@ -1322,7 +1337,7 @@ function draw() {
   g.fillStyle = '#19e6ff'; g.fillRect(0, 0, W * Math.min(1, xp / xpNext), 5);
   g.fillStyle = '#e8e6ff'; g.font = '14px system-ui';
   g.fillText(`Lv ${level}  ·  ${time / 60 | 0}:${String(time % 60 | 0).padStart(2, '0')}  ·  ${kills} kills  ·  ${enemies.length} enemies ·  ${biome.n}`, 10, 40);
-  g.fillText(`Bolt ${player.w.bolt}  Blades ${player.w.orb}  Nova ${player.w.nova}${player.w.arc ? '  Arc ' + player.w.arc : ''}${player.w.mine ? '  Mines ' + player.w.mine : ''}${player.w.shard ? '  Shards ' + player.w.shard : ''}${player.relics && player.relics.length ? '  ★' + player.relics.length : ''}`, 10, 58);
+  g.fillText(`${weaponHud(player)}${player.relics && player.relics.length ? '  ★' + player.relics.length : ''}`, 10, 58);
   if (bot) g.fillText(`Bot: ${bot.down ? 'DOWN - up in ' + Math.max(0, Math.ceil(REVIVE_T - (bot.adn || 0))) + 's, or stand near' : Math.ceil(bot.hp) + ' HP'}${botMsg ? ' · ' + botMsg : ''}`, 10, 76);
   if (joy) {
     g.strokeStyle = '#fff6'; g.lineWidth = 2;
@@ -1967,11 +1982,7 @@ function broadcastSnap() {
 
 /* ----- co-op level-up: every player gets their own non-blocking pick (15 s, then the first option) ----- */
 function rollChoices(p) {                                // same rules as the solo level-up screen
-  const owned = Object.keys(p.w).filter(k => p.w[k] > 0).length;
-  const pool = UPGRADES.filter(u => u.p || (p.w[u.id] < 6 && (p.w[u.id] > 0 || owned < MAX_WEAPONS)));
-  const evos = Object.keys(EVO).filter(k => p.w[k] >= 6 && !p.evo[k] && (p.pc[EVO[k].p] || 0) >= 2).map(k => ({ ...EVO[k], evo: 1 }));
-  const picks = evos.slice(0, 1);
-  while (picks.length < 3 && pool.length) picks.push(pool.splice(rng() * pool.length | 0, 1)[0]);
+  const picks = rollPicks(p);
   return picks.map(u => ({ id: u.id, n: u.n, d: u.d, evo: u.evo ? 1 : 0, p: u.p ? 1 : 0, lv: p.w[u.id] || 0 }));
 }
 function coopLevelUp() {
@@ -2008,7 +2019,7 @@ function coopStartClient(m) {
   S.bot = 0; seed = cleanSeed(m.seed); runSeed = seed; chunks = new Map(); runMut = 0;
   enemies = []; bullets = []; eBullets = []; gems = []; packs = []; rings = []; arcs = []; mines = [];
   time = 0; kills = 0; level = 1; xp = 0; xpNext = TUNE.xpNeed(1); bossCount = 0; cam = { x: 0, y: 0 };
-  hazards = []; relics = []; clientGuards = [];
+  guardReset(); hazards = []; relics = []; clientGuards = [];
   cp.clear(); player = makePlayer(net.idx); cp.set(net.idx, player); players = [player];
   snaps = []; inTimer = 0; lastIn = ''; netStat.lastSeq = 0; netStat.last = performance.now(); netStat.err = ''; net.onMsg = (e, msg) => clientGame(msg);
   hidePicker(); hide(); state = 'play'; startMusic();
@@ -2142,16 +2153,46 @@ const RELIC = [   // one unique relic per guardian; each can be collected up to 
   { n: 'Void Shard',  d: '+20% speed, +60% pickup range',      c: '#d46bff', apply: p => { p.spd *= 1.2; p.mag *= 1.6; } }
 ];
 const guardType = (cx, cy) => BIOMES.indexOf(biomeAt(cx * CELL + 1, cy * CELL + 1));
-const hasGuardian = (cx, cy) => GUARD_ON && (cx !== 0 || cy !== 0) && hashStr(seed + 'G' + cx + ',' + cy) % 100 < 55 && !guardSlain.has(cx + ',' + cy);
-const guardianHome = (cx, cy) => ({ x: cx * CELL + 350 + hashStr(seed + 'Gx' + cx + ',' + cy) % (CELL - 700), y: cy * CELL + 350 + hashStr(seed + 'Gy' + cx + ',' + cy) % (CELL - 700) });
+const guardRollMemo = new Map(), guardHomeMemo = new Map(), guardWinMemo = new Map();      // per-seed memo of the (hash-heavy) per-cell lookups; cleared by guardReset
+const cellKey = (cx, cy) => (cx + 32768) * 65536 + (cy + 32768);
+function guardReset() { guardSlain.clear(); guardActive.clear(); guardMem.clear(); guardRollMemo.clear(); guardHomeMemo.clear(); guardWinMemo.clear(); }
+function guardRoll(cx, cy) {
+  const k = cellKey(cx, cy); let v = guardRollMemo.get(k);
+  if (v === undefined) { if (guardRollMemo.size > 20000) guardRollMemo.clear(); v = hashStr(seed + 'G' + cx + ',' + cy) % 100 < 55; guardRollMemo.set(k, v); }
+  return v;
+}
+const hasGuardian = (cx, cy) => GUARD_ON && (cx !== 0 || cy !== 0) && guardRoll(cx, cy) && !guardSlain.has(cx + ',' + cy);
+function guardianHome(cx, cy) {
+  const k = cellKey(cx, cy); let v = guardHomeMemo.get(k);
+  if (v === undefined) {
+    if (guardHomeMemo.size > 20000) guardHomeMemo.clear();
+    v = { x: cx * CELL + 350 + hashStr(seed + 'Gx' + cx + ',' + cy) % (CELL - 700), y: cy * CELL + 350 + hashStr(seed + 'Gy' + cx + ',' + cy) % (CELL - 700) };
+    guardHomeMemo.set(k, v);
+  }
+  return v;
+}
 const AFFIX = ['Swift', 'Brutal', 'Volatile', 'Regenerating'], TOUCH = ['Prismatic', 'Molten', 'Blighted', 'Voidborn'];   // affixes; adjectives for borrowed powers
 const GKEEP = [140, 160, 220, 200];                                // preferred distance per kit (index = guardian type)
+function guardWindow(cx0, cy0) {                                   // the 9x9 cells around a cell that roll a guardian (memoised per window)
+  const k = cellKey(cx0, cy0); let w = guardWinMemo.get(k);
+  if (!w) {
+    if (guardWinMemo.size > 2000) guardWinMemo.clear();
+    w = [];
+    for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
+      const cx = cx0 + i, cy = cy0 + j;
+      if ((cx !== 0 || cy !== 0) && guardRoll(cx, cy)) w.push({ cx, cy, key: cx + ',' + cy, home: guardianHome(cx, cy) });
+    }
+    guardWinMemo.set(k, w);
+  }
+  return w;
+}
 function guardianCellsNear(p) {                                    // nearest guardian cells (also drives the edge markers)
-  const out = [], cx0 = Math.floor(p.x / CELL), cy0 = Math.floor(p.y / CELL);
-  for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) {
-    const cx = cx0 + i, cy = cy0 + j; if (!hasGuardian(cx, cy)) continue;
-    const at = guardActive.get(cx + ',' + cy) || guardianHome(cx, cy);
-    out.push({ cx, cy, x: at.x, y: at.y, d: dist2(at.x, at.y, p.x, p.y) });
+  if (!GUARD_ON) return [];
+  const out = [];
+  for (const c of guardWindow(Math.floor(p.x / CELL), Math.floor(p.y / CELL))) {
+    if (guardSlain.has(c.key)) continue;
+    const at = guardActive.get(c.key) || c.home;
+    out.push({ cx: c.cx, cy: c.cy, x: at.x, y: at.y, d: dist2(at.x, at.y, p.x, p.y) });
   }
   out.sort((a, b) => a.d - b.d); return out.slice(0, 3);
 }
