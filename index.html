@@ -386,7 +386,9 @@ const TUNE = {
   bossAt:      n  => 150 * (n + 1),
   bossHp:      n  => 1 + n * 0.8 + n * n * 0.1,
   dmgMult:     t  => 1 + Math.max(0, t - 360) / 360,                      // enemy contact + bullet damage: the late-game ceiling
-  bossShards:  n  => 10 + 2 * n
+  bossShards:  n  => 10 + 2 * n,
+  guardHp:     t  => 1.2 + 0.45 * t / 60,                                  // biome guardian HP multiplier (x base HP) by run time: tracks player DPS growth
+  guardDmg:    t  => Math.min(2.2, TUNE.dmgMult(t)) * Math.min(1, 0.55 + 0.45 * t / 360)   // guardian damage: capped (player HP only roughly doubles) and softened early (ramps up over 6 min)
 };
 
 /* ========== Weapons & upgrades (data-driven) ==========
@@ -2210,8 +2212,8 @@ function setKits(e) {                                              // own kit + 
 }
 function spawnGuardian(cx, cy) {
   const key = cx + ',' + cy, type = guardType(cx, cy), t = ENEMY[8 + type], mem = guardMem.get(key), home = guardianHome(cx, cy), ring = Math.max(Math.abs(cx), Math.abs(cy));
-  const gn = mem ? mem.gn : guardGenome(cx, cy, type, ring), dm = TUNE.dmgMult(time) * (gn.aff === 1 ? 1.3 : 1);
-  const hp = mem ? mem.mh : t.hp * (0.7 + 0.3 * TUNE.hpMult(time)) * (1 + 0.3 * ring) * crowd(0.5);
+  const gn = mem ? mem.gn : guardGenome(cx, cy, type, ring), dm = TUNE.guardDmg(time) * (gn.aff === 1 ? 1.3 : 1);
+  const hp = mem ? mem.mh : t.hp * TUNE.guardHp(time) * (1 + 0.3 * ring) * crowd(0.5);
   const e = { id: ++enemySeq, k: 8 + type, boss: false, guardian: true, x: mem ? mem.x : home.x, y: mem ? mem.y : home.y, r: t.r, hp: mem ? mem.hp : hp, mh: hp,
               s: t.s * (gn.aff === 0 ? 1.25 : 1), d: t.d * dm, dm, c: t.c, cd: 5, fl: 0, oc: 0, lb: null, home: { cx, cy, key }, aggro: 0,
               gn, eno: mem ? mem.eno : 0, ph: mem ? mem.ph : 0 };
@@ -2268,7 +2270,7 @@ const GKIT = [
     return false;
   },
   function (e, k, t, x) {                                          // Cinder Tyrant: meteor rain, lava rings
-    if ((k.a -= x.dt) <= 0) { k.a = 5 * x.cs / x.pw; const n = 3 + (x.T >> 1); for (let j = 0; j < n; j++) addHazard({ kind: 0, x: t.x + (grng() - 0.5) * 220, y: t.y + (grng() - 0.5) * 220, r: 72, age: 0, delay: 1.1, life: 1.6, dmg: 34 * e.dm, dm: e.dm }); }
+    if ((k.a -= x.dt) <= 0) { k.a = 5 * x.cs / x.pw; const n = 3 + (x.T >> 2); for (let j = 0; j < n; j++) addHazard({ kind: 0, x: t.x + (grng() - 0.5) * 220, y: t.y + (grng() - 0.5) * 220, r: 72, age: 0, delay: 1.4 - 0.05 * x.T, life: 1.9 - 0.05 * x.T, dmg: 20.0 * e.dm, dm: e.dm }); }
     if ((k.b -= x.dt) <= 0) { k.b = 6.5 * x.cs / x.pw; const n = 16 + 2 * (x.T >> 1); for (let j = 0; j < n; j++) fire(e, j * 6.283 / n + k.ang, 120, 11); k.ang += 0.2; }
     return false;
   },
