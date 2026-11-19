@@ -163,7 +163,7 @@ function unlockAch(a) {
   playTone(880, 0.2, 'sine', 0.05);
   if (typeof setTimeout === 'function') setTimeout(() => { t.style.display = 'none'; }, 3500);
 }
-function checkAch() { if (player) for (const a of ACH) if (!S.ach[a.id] && a.t()) unlockAch(a); }
+function checkAch() { if (player && !dbgTaint) for (const a of ACH) if (!S.ach[a.id] && a.t()) unlockAch(a); }
 
 const defaultSave = () => ({
   v: 1, shards: 0, up: { hp: 0, dmg: 0, spd: 0, mag: 0 },
@@ -371,7 +371,7 @@ const AI = {
 
 const DEATH = {
   split(e) { for (let i = 0; i < 2; i++) enemies.push(makeEnemy(1, e.x + i * 12, e.y, ENEMY[1].hp)); },
-  boss() { bossCount++; S.bosses++; S.shards += TUNE.bossShards(bossCount); }
+  boss() { bossCount++; if (!dbgTaint) { S.bosses++; S.shards += TUNE.bossShards(bossCount); } }
 };
 
 /* ========== Scaling: every curve in one place. t = seconds survived, lv = player level, n = bosses killed ========== */
@@ -892,6 +892,7 @@ function start(sd) {
   spawnAcc = 0; bossCount = 0; gcTimer = 0;
   cam = { x: 0, y: 0 };
   trail.length = 0;
+  dbgTaint = false; dbgTs = 1; dbgGod = dbgNoSpawn = dbgFreeze = false;
   initBot(); startMusic(); hide(); state = 'play';
   playTone(440, 0.15, 'sawtooth');
 }
@@ -900,12 +901,15 @@ function gameOver() {
   if (net && net.role !== 'solo') return coopGameOver();
   state = 'over';
   checkAch();
-  const earn = Math.floor((time / 6 + kills / 8) * mutBonus());
-  S.shards += earn; S.runs++; S.kills += kills;
-  S.best = Math.max(S.best, time | 0);
-  if (/^D\d{4}-/.test(runSeed))
-    S.daily[runSeed.slice(1)] = Math.max(S.daily[runSeed.slice(1)] || 0, time | 0);
-  save(); stopMusic();
+  const earn = dbgTaint ? 0 : Math.floor((time / 6 + kills / 8) * mutBonus());   // debug runs are not saved
+  if (!dbgTaint) {
+    S.shards += earn; S.runs++; S.kills += kills;
+    S.best = Math.max(S.best, time | 0);
+    if (/^D\d{4}-/.test(runSeed))
+      S.daily[runSeed.slice(1)] = Math.max(S.daily[runSeed.slice(1)] || 0, time | 0);
+    save();
+  }
+  stopMusic();
   const code = btoa(JSON.stringify({ s: runSeed, t: time | 0, k: kills, l: level }));
   playTone(120, 0.5, 'sawtooth', 0.08);
   show(`<h2>Run over</h2>
@@ -1073,7 +1077,7 @@ function tick(dt) {
   spawnAcc += dt * TUNE.spawnRate(time) * (mutOn(1) ? 1.5 : 1) * crowd(0.6);
   while (spawnAcc >= 1) {
     spawnAcc--;
-    if (enemies.length < TUNE.enemyCap(time) + 80 * (crowd(1) - 1)) spawnEnemy(false);
+    if (enemies.length < TUNE.enemyCap(time) + 80 * (crowd(1) - 1) && !dbgNoSpawn) spawnEnemy(false);
   }
   if (time >= TUNE.bossAt(bossCount) && !enemies.some(e => e.boss)) spawnEnemy(true);
 
@@ -1330,6 +1334,7 @@ function draw() {
   }
   drawMates(ox, oy);
   drawGuardianUI(ox, oy);
+  if (debug || dbgTaint) drawDebug(ox, oy);
   g.shadowBlur = 0;
 
   // HUD
@@ -2210,13 +2215,16 @@ function setKits(e) {                                              // own kit + 
   for (let i = 0; i < Math.min(e.ph, nb); i++) { const ty = e.gn.ab[(bm0 + i) % 3]; e.kits.push(ty); bm |= 1 << ty; }
   e.mx = (e.gn.aff + 1) | (e.ph << 3) | (bm << 5);
 }
-function spawnGuardian(cx, cy) {
-  const key = cx + ',' + cy, type = guardType(cx, cy), t = ENEMY[8 + type], mem = guardMem.get(key), home = guardianHome(cx, cy), ring = Math.max(Math.abs(cx), Math.abs(cy));
-  const gn = mem ? mem.gn : guardGenome(cx, cy, type, ring), dm = TUNE.guardDmg(time) * (gn.aff === 1 ? 1.3 : 1);
+function spawnGuardian(cx, cy, ovr) {                              // ovr (debug mode only): forced type / affix / tier / ring / phase / encounter / position
+  const key = ovr ? 'dbg' + (++dbgSeq) : cx + ',' + cy, type = ovr ? ovr.type : guardType(cx, cy), t = ENEMY[8 + type], mem = ovr ? null : guardMem.get(key);
+  const home = ovr ? { x: ovr.x, y: ovr.y } : guardianHome(cx, cy), ring = ovr ? ovr.ring : Math.max(Math.abs(cx), Math.abs(cy));
+  const gn = mem ? mem.gn : guardGenome(cx, cy, type, ring); if (ovr) { if (ovr.aff !== undefined) gn.aff = ovr.aff; if (ovr.tier !== undefined) gn.tier = ovr.tier; }
+  const dm = TUNE.guardDmg(time) * (gn.aff === 1 ? 1.3 : 1);
   const hp = mem ? mem.mh : t.hp * TUNE.guardHp(time) * (1 + 0.3 * ring) * crowd(0.5);
   const e = { id: ++enemySeq, k: 8 + type, boss: false, guardian: true, x: mem ? mem.x : home.x, y: mem ? mem.y : home.y, r: t.r, hp: mem ? mem.hp : hp, mh: hp,
               s: t.s * (gn.aff === 0 ? 1.25 : 1), d: t.d * dm, dm, c: t.c, cd: 5, fl: 0, oc: 0, lb: null, home: { cx, cy, key }, aggro: 0,
               gn, eno: mem ? mem.eno : 0, ph: mem ? mem.ph : 0 };
+  if (ovr) { e.dbg = true; e.eno = Math.max(0, ovr.eno - 1); e.ph = ovr.ph; if (e.ph) e.hp = e.mh * (e.ph >= 2 ? 0.3 : 0.6); }
   setKits(e); enemies.push(e); guardActive.set(key, e);
 }
 function guardianTick(dt) {
@@ -2237,7 +2245,7 @@ function guardianTick(dt) {
     const e = enemies[i]; if (!e.guardian) continue;
     let near = false;
     for (const p of players) if (p.hp > 0 && !p.afk && Math.hypot(p.x - e.x, p.y - e.y) < 2600) { near = true; break; }
-    if (!near) { guardMem.set(e.home.key, { hp: e.hp, mh: e.mh, x: e.x, y: e.y, gn: e.gn, eno: e.eno, ph: e.ph }); guardActive.delete(e.home.key); enemies.splice(i, 1); }
+    if (!near && !e.dbg) { guardMem.set(e.home.key, { hp: e.hp, mh: e.mh, x: e.x, y: e.y, gn: e.gn, eno: e.eno, ph: e.ph }); guardActive.delete(e.home.key); enemies.splice(i, 1); }
   }
 }
 const gTargets = () => bot && !bot.down ? players.concat([bot]) : players;       // the bot takes hazard damage and draws guardian aggro too
@@ -2325,12 +2333,12 @@ function guardAI(e, dt) {
   if (gn.aff === 3) e.hp = Math.min(e.mh, e.hp + e.mh * 0.01 * dt);   // Regenerating
   if (!busy && x.dist > GKEEP[own]) moveToward(e, t.x, t.y, e.s * enr, dt);
 }
-AI.guard = (e, dt) => guardAI(e, dt);
+AI.guard = (e, dt) => { if (!dbgFreeze) guardAI(e, dt); };
 DEATH.guardian = e => guardianKilled(e);
 function guardianKilled(e) {
   const type = e.k - 8, ring = Math.max(Math.abs(e.home.cx), Math.abs(e.home.cy)), T = gTier(e), twin = T >= 3 && e.kits.length > 1;
   guardSlain.add(e.home.key); guardActive.delete(e.home.key); guardMem.delete(e.home.key);
-  S.gk |= 1 << type; S.bosses++; S.shards += 12 + 3 * ring + 4 * T;
+  if (!dbgTaint) { S.gk |= 1 << type; S.bosses++; S.shards += 12 + 3 * ring + 4 * T; }
   relics.push({ x: e.x, y: e.y, type });
   if (twin) relics.push({ x: e.x + 46, y: e.y + 20, type: e.kits[1] });   // a well-evolved guardian also leaves a relic of a power it borrowed
   if (e.gn.aff === 2) for (let j = 0; j < 16; j++) fire(e, j * 0.3927, 160, 10);   // Volatile: dies in a burst
@@ -2466,13 +2474,141 @@ function mpBack() {
   state = 'lobby'; lobbyScreen();
 }
 
+/* ========== Debug mode ==========
+   F1 or ` toggles it (or open the page with ?debug). Solo runs only. A clickable panel can force a guardian (type, affix, tier, phase,
+   encounter), edit the player (weapons, passives, evolutions, relics, god mode, level/time jumps, build presets), down/revive the bot,
+   spawn or clear waves and change game speed. Anything that changes the run marks it as a debug run: no achievements, shards, bests or saves.
+   The live readout shows fps, counts, the TUNE curves, the nearest guardian (tier, phase, encounter, kits, timers, DPS in/out) and the bot. */
+let dbgTaint = false, dbgSeq = 0, dbgTs = 1, dbgGod = false, dbgNoSpawn = false, dbgFreeze = false, dbgEl = null, dbgT = 0, dbgFps = 60;
+const dbgStat = { g: null, hp: 0, out: 0, php: 0, inn: 0 };
+const dbgSolo = () => !net || net.role === 'solo';
+const dbgSel = id => document.getElementById('dbg-' + id).value;
+const dbgFocus = () => { let b = null, bd = 1e18; for (const e of enemies) if (e.guardian) { const d = dist2(e.x, e.y, player.x, player.y); if (d < bd) { bd = d; b = e; } } return b; };
+const DBG_BUILDS = {                                              // the same builds as the balance harness (about lv 11/19/27/36 at 3/7/12/18 min)
+  '3 min':  { t: 180,  lv: 11, hp: 125, dmg: 1.4, rate: 1.15, area: 1.0, regen: 0,   w: { bolt: 4, orb: 3, nova: 2 }, evo: {} },
+  '7 min':  { t: 420,  lv: 19, hp: 150, dmg: 1.4, rate: 1.3,  area: 1.15, regen: 0.4, w: { bolt: 6, orb: 4, nova: 4, arc: 3 }, evo: {} },
+  '12 min': { t: 720,  lv: 27, hp: 200, dmg: 1.7, rate: 1.45, area: 1.3, regen: 0.8, w: { bolt: 6, orb: 6, nova: 6, arc: 6 }, evo: { bolt: 1 } },
+  '18 min': { t: 1080, lv: 36, hp: 260, dmg: 2.2, rate: 1.7,  area: 1.5, regen: 1.2, w: { bolt: 6, orb: 6, nova: 6, arc: 6 }, evo: { bolt: 1, arc: 1, nova: 1, orb: 1 } }
+};
+const DBGA = {
+  spawn() {                                                       // a guardian next to the player with the chosen genome / phase / encounter
+    const aff = dbgSel('aff'), tier = dbgSel('tier'), a = Math.random() * 6.283;
+    spawnGuardian(Math.floor(player.x / CELL), Math.floor(player.y / CELL), { type: +dbgSel('type'), aff: aff === 'nat' ? undefined : +aff, tier: tier === 'nat' ? undefined : +tier,
+      ring: +dbgSel('ring'), ph: +dbgSel('ph'), eno: +dbgSel('eno'), x: player.x + Math.cos(a) * 380, y: player.y + Math.sin(a) * 380 });
+  },
+  gkill() { for (const e of enemies) if (e.guardian) e.hp = 0; },
+  gheal() { for (const e of enemies) if (e.guardian) e.hp = e.mh; },
+  gphase() { const g = dbgFocus(); if (g) g.hp = Math.min(g.hp, g.mh * (g.ph >= 1 ? 0.3 : 0.64)); },     // just under the next phase threshold
+  genc() { const g = dbgFocus(); if (g) { g.eno = (g.eno | 0) + 1; setKits(g); } },                          // as if the fight had been restarted
+  gfreeze() { dbgFreeze = !dbgFreeze; },
+  gto() { const c = guardianCellsNear(player)[0]; if (c) { player.x = c.x - 450; player.y = c.y; } },       // teleport next to the nearest guardian cell
+  god() { dbgGod = !dbgGod; },
+  heal() { for (const p of players) p.hp = p.mhp; if (bot && !bot.down) bot.hp = bot.mhp; },
+  lvl() { if (state === 'play') xp = xpNext; },
+  wp(d) { player.w[d.id] = Math.min(WEAPON_MAX, (player.w[d.id] | 0) + 1); },
+  wmax() { for (const id in WEAPONS) player.w[id] = WEAPON_MAX; },
+  evo(d) { player.evo[d.id] = player.evo[d.id] ? 0 : 1; },
+  ps(d) { applyUpgrade(player, d.id); },
+  relic(d) { grantRelic(player, +d.id); },
+  time(d) { time += +d.s; },
+  speed(d) { dbgTs = +d.v; },
+  wave() { for (let i = 0; i < 25; i++) spawnEnemy(false); },
+  wboss() { spawnEnemy(true); },
+  clear() { enemies = enemies.filter(e => e.guardian); eBullets.length = 0; hazards.length = 0; },
+  nospawn() { dbgNoSpawn = !dbgNoSpawn; },
+  bdown() { if (bot) { bot.hp = 0; bot.down = 1; bot.rv = 0; } },
+  brevive() { if (bot) { bot.down = 0; bot.hp = bot.mhp / 2; bot.rv = 0; bot.adn = 0; bot.iv = 1.5; } },
+  bskip() { if (bot && bot.down) bot.adn = REVIVE_T - 1; },        // one second before the 45 s auto-revive
+  build(d) {
+    const b = DBG_BUILDS[d.id];
+    Object.assign(player, { mhp: b.hp, hp: b.hp, dmg: b.dmg, rate: b.rate, area: b.area, regen: b.regen, pc: {}, evo: { ...b.evo } });
+    player.w = Object.assign(newWeaponLevels(), b.w); time = b.t; level = b.lv; xp = 0; xpNext = TUNE.xpNeed(level);
+  },
+  dump() {
+    const g = dbgFocus(), o = JSON.stringify({ seed: runSeed, time: time | 0, level, tune: { guardHp: TUNE.guardHp(time), guardDmg: TUNE.guardDmg(time) },
+      player: { hp: player.hp, mhp: player.mhp, dmg: player.dmg, rate: player.rate, area: player.area, w: player.w, evo: player.evo, relics: player.relics },
+      guardian: g && { k: g.k, hp: g.hp, mh: g.mh, tier: gTier(g), ph: g.ph, eno: g.eno, gn: g.gn, kits: g.kits, st: g.st } }, null, 1);
+    try { navigator.clipboard.writeText(o); } catch {}
+    console.log(o);
+  }
+};
+function dbgMake() {
+  const o = (arr) => arr.map(([v, t]) => '<option value="' + v + '">' + t + '</option>').join('');
+  const b = (a, t, x = '') => '<button data-a="' + a + '" ' + x + '>' + t + '</button>';
+  const sec = (t, body, open) => '<details' + (open ? ' open' : '') + '><summary>' + t + '</summary>' + body + '</details>';
+  const el = dbgEl = document.createElement('div'); el.id = 'dbg';
+  el.style.cssText = 'position:fixed;top:6px;right:6px;width:268px;max-height:94vh;overflow:auto;background:#0b0a1ae6;color:#cfe;font:11px/1.35 monospace;border:1px solid #19e6ff66;border-radius:6px;padding:6px;z-index:50;user-select:none';
+  el.innerHTML = '<style>#dbg button{font:10px monospace;margin:1px;padding:2px 4px;background:#14243a;color:#cfe;border:1px solid #19e6ff55;border-radius:3px;cursor:pointer}#dbg select{font:10px monospace;background:#14243a;color:#cfe;max-width:84px}#dbg summary{cursor:pointer;color:#ffd02b;margin-top:4px}</style>' +
+    '<b style="color:#19e6ff">DEBUG</b> <small>(F1 / ` to hide)</small><pre id="dbg-live" style="margin:4px 0;white-space:pre-wrap"></pre>' +
+    sec('Guardian', 'type <select id="dbg-type">' + o([[0, 'Prism'], [1, 'Cinder'], [2, 'Bloom'], [3, 'Void']]) + '</select> affix <select id="dbg-aff">' + o([['nat', 'natural'], [-1, 'none'], [0, 'Swift'], [1, 'Brutal'], [2, 'Volatile'], [3, 'Regen']]) + '</select><br>' +
+      'tier <select id="dbg-tier">' + o([['nat', 'auto'], [0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 5]]) + '</select> phase <select id="dbg-ph">' + o([[0, 0], [1, 1], [2, 2]]) + '</select> enc <select id="dbg-eno">' + o([[1, 1], [2, 2], [3, 3], [4, 4]]) + '</select> ring <select id="dbg-ring">' + o([[1, 1], [2, 2], [3, 3], [4, 4], [5, 5], [6, 6]]) + '</select><br>' +
+      b('spawn', 'Spawn') + b('gkill', 'Kill') + b('gheal', 'Heal') + b('gphase', 'Next phase') + b('genc', '+Encounter') + b('gfreeze', 'Freeze AI') + b('gto', 'TP to nearest'), true) +
+    sec('Player', b('god', 'God') + b('heal', 'Heal') + b('lvl', 'Level up') + b('wmax', 'Max weapons') + '<br>' + Object.keys(WEAPONS).map(id => b('wp', WEAPONS[id].hud + '+', 'data-id="' + id + '"')).join('') + '<br>evo: ' +
+      Object.keys(EVO).map(id => b('evo', EVO[id].n, 'data-id="' + id + '"')).join('') + '<br>' + Object.keys(PASSIVES).map(id => b('ps', PASSIVES[id].n, 'data-id="' + id + '"')).join('') + '<br>relics: ' + RELIC.map((r, i) => b('relic', r.n, 'data-id="' + i + '"')).join('')) +
+    sec('Builds (= balance harness)', Object.keys(DBG_BUILDS).map(k => b('build', k, 'data-id="' + k + '"')).join('')) +
+    sec('Bot', b('bdown', 'Down bot') + b('brevive', 'Revive now') + b('bskip', 'Skip to 44 s')) +
+    sec('World', b('time', '+1 min', 'data-s="60"') + b('time', '+5 min', 'data-s="300"') + b('speed', '0.25x', 'data-v="0.25"') + b('speed', '1x', 'data-v="1"') + b('speed', '2x', 'data-v="2"') + b('speed', '4x', 'data-v="4"') + '<br>' +
+      b('wave', 'Wave +25') + b('wboss', 'Wave boss') + b('clear', 'Clear foes/bullets') + b('nospawn', 'Toggle spawns')) +
+    '<div style="margin-top:4px">' + b('dump', 'Copy state JSON') + '</div>';
+  el.addEventListener('click', e => { const t = e.target, a = t.dataset && t.dataset.a; if (!a || !DBGA[a]) return; dbgTaint = true; if (player) DBGA[a](t.dataset); t.blur(); dbgT = 0; });
+  document.body.appendChild(el);
+}
+const dbgTime = s => ((s / 60) | 0) + ':' + String(s % 60 | 0).padStart(2, '0');
+function dbgLive() {
+  const g = dbgFocus(), p = player, L = [], n = x => x.toFixed(1), KN = ['Prism', 'Cinder', 'Bloom', 'Void'];
+  L.push('fps ' + (dbgFps | 0) + '  t ' + dbgTime(time) + '  lv ' + level + '  x' + dbgTs + (dbgGod ? '  GOD' : '') + (dbgNoSpawn ? '  NO-SPAWN' : '') + (dbgFreeze ? '  FROZEN' : ''));
+  L.push('foes ' + enemies.length + ' bul ' + bullets.length + ' e-bul ' + eBullets.length + ' hz ' + hazards.length);
+  L.push('hp ' + (p.hp | 0) + '/' + (p.mhp | 0) + '  taking ' + n(dbgStat.inn) + '/s  dmg x' + p.dmg.toFixed(2) + ' rate x' + p.rate.toFixed(2));
+  L.push('TUNE guardHp x' + TUNE.guardHp(time).toFixed(2) + ' guardDmg x' + TUNE.guardDmg(time).toFixed(2) + ' hpMult x' + TUNE.hpMult(time).toFixed(2) + ' dmgMult x' + TUNE.dmgMult(time).toFixed(2));
+  if (bot) L.push('bot ' + (bot.down ? 'DOWN, auto-up in ' + Math.max(0, REVIVE_T - (bot.adn || 0)).toFixed(0) + 's' : (bot.hp | 0) + '/' + (bot.mhp | 0)));
+  if (g) {
+    const T = gTier(g), nm = ENEMY[g.k].name, tags = guardTags(g), tt = dbgStat.out > 1 ? (g.hp / dbgStat.out).toFixed(0) + 's' : '-';
+    L.push('', nm + (tags ? ' [' + tags + ']' : ''));
+    L.push('hp ' + (g.hp | 0) + '/' + (g.mh | 0) + ' (' + (100 * g.hp / g.mh | 0) + '%)  dmg-in ' + (dbgStat.out | 0) + '/s  ttk ~' + tt);
+    L.push('tier ' + T + ' (base ' + g.gn.tier + (g.eno > 1 ? ' +' + Math.min(3, g.eno - 1) + ' enc' : '') + ')  phase ' + g.ph + '  enc ' + (g.eno | 0) + '  dist ' + (Math.hypot(g.x - p.x, g.y - p.y) | 0));
+    L.push('kits ' + g.kits.map((k, i) => KN[k] + (i ? '*' : '')).join(', ') + '  next borrow ' + (g.gn.ab[Math.max(0, (g.eno | 0) - 1) % 3] != null ? KN[g.gn.ab[Math.max(0, (g.eno | 0) - 1) % 3]] : '-'));
+    for (const k of g.kits) { const s = g.st && g.st[k]; if (s) L.push('  ' + KN[k] + ' a' + n(Math.max(0, s.a)) + ' b' + n(Math.max(0, s.b)) + ' c' + n(Math.max(0, s.c)) + (s.w > 0 ? ' WINDUP' : '') + (s.dash > 0 ? ' DASH' : '')); }
+  } else L.push('', 'no guardian active (spawn one, or TP to nearest)');
+  return L.join('\n');
+}
+function dbgFrame(d) {
+  const want = debug && player && dbgSolo() && state !== 'title' && state !== 'over' && state !== 'lobby';
+  if (want && !dbgEl) dbgMake(); else if (!want && dbgEl) { dbgEl.remove(); dbgEl = null; }
+  dbgFps += (1 / Math.max(d, 1e-3) - dbgFps) * 0.05;
+  if (dbgGod && player && state === 'play') { for (const p of players) { p.hp = p.mhp; p.iv = Math.max(p.iv, 1); } if (bot && !bot.down) bot.hp = bot.mhp; }
+  if (!dbgEl) return;
+  const g = dbgFocus(), a = 1 - Math.exp(-d), dd = Math.max(d, 1e-3);
+  dbgStat.out = g && dbgStat.g === g && state === 'play' ? dbgStat.out + (Math.max(0, dbgStat.hp - g.hp) / dd - dbgStat.out) * a : 0;
+  dbgStat.g = g; dbgStat.hp = g ? g.hp : 0;
+  dbgStat.inn = state === 'play' ? dbgStat.inn + (Math.max(0, dbgStat.php - player.hp) / dd - dbgStat.inn) * a : 0; dbgStat.php = player.hp;
+  if ((dbgT -= d) <= 0) { dbgT = 0.25; const el = document.getElementById('dbg-live'); if (el) el.textContent = dbgLive(); }
+}
+function drawDebug(ox, oy) {                                      // world overlay: home cells, aggro radius, hitboxes, hazards
+  g.save(); g.textAlign = 'center'; g.font = '10px monospace';
+  if (debug) {
+    for (const e of enemies) if (e.guardian) {
+      g.strokeStyle = e.c; g.globalAlpha = 0.35; g.setLineDash([6, 6]); g.strokeRect(e.home.cx * CELL + ox, e.home.cy * CELL + oy, CELL, CELL);
+      g.beginPath(); g.arc(e.x + ox, e.y + oy, 450, 0, 6.283); g.stroke(); g.setLineDash([]);
+      g.globalAlpha = 0.8; g.beginPath(); g.arc(e.x + ox, e.y + oy, e.r, 0, 6.283); g.stroke();
+      g.fillStyle = '#fff'; g.fillText('T' + gTier(e) + ' ph' + e.ph + ' enc' + (e.eno | 0) + ' ' + (100 * e.hp / e.mh | 0) + '%', e.x + ox, e.y + oy + e.r + 14);
+      g.globalAlpha = 0.2; g.beginPath(); g.moveTo(player.x + ox, player.y + oy); g.lineTo(e.x + ox, e.y + oy); g.stroke();
+    }
+    g.strokeStyle = '#ffd02b'; g.globalAlpha = 0.6; for (const h of hazards) { g.beginPath(); g.arc(h.x + ox, h.y + oy, h.r, 0, 6.283); g.stroke(); }
+  }
+  g.globalAlpha = 1;
+  if (dbgTaint) { g.fillStyle = '#ff4466'; g.fillText('DEBUG RUN - progress is not saved', W / 2, H - 8); }
+  g.restore();
+}
+if (/[?&]debug\b/.test(location.search)) debug = true;
+
 function frame(t) {
   requestAnimationFrame(frame);
   const d = Math.min((t - last) / 1000, 0.1);
   last = t;
+  dbgFrame(d);
   if (net && net.role === 'client' && state === 'play') { clientFrame(d); return; }   // clients only render
   if (state === 'play') {
-    acc += d;
+    acc += d * (dbgSolo() ? dbgTs : 1);
     while (acc >= 1 / 60 && state === 'play') { tick(1 / 60); acc -= 1 / 60; }
   }
   draw();
